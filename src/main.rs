@@ -14,14 +14,13 @@ mod renderer;
 use glenda::cap::{
     CSPACE_CAP, CapType, ENDPOINT_CAP, ENDPOINT_SLOT, MONITOR_CAP, RECV_SLOT, REPLY_SLOT,
 };
-use glenda::client::{DeviceClient, ResourceClient};
+use glenda::client::{DeviceClient, InitClient, ResourceClient};
 use glenda::interface::{ResourceService, SystemService};
 use glenda::ipc::Badge;
-use glenda::protocol::resource::{DEVICE_ENDPOINT, ResourceType};
-use glenda::utils::manager::{CSpaceManager, CSpaceService, NullProvider};
+use glenda::protocol::resource::{DEVICE_ENDPOINT, INIT_ENDPOINT, ResourceType};
+use glenda::utils::manager::CSpaceManager;
 use layout::*;
 use prism::PrismServer;
-use prism::device::DeviceManager;
 
 #[unsafe(no_mangle)]
 fn main() -> usize {
@@ -33,13 +32,18 @@ fn main() -> usize {
     let mut res_client = ResourceClient::new(MONITOR_CAP);
 
     // 2. Obtain Unicorn (Device Manager) Endpoint
-    let unicorn_ep_slot = cspace_mgr.alloc(&mut NullProvider).expect("Failed to alloc slot");
     res_client
-        .get_cap(Badge::null(), ResourceType::Endpoint, DEVICE_ENDPOINT, unicorn_ep_slot)
+        .get_cap(Badge::null(), ResourceType::Endpoint, DEVICE_ENDPOINT, DEVICE_SLOT)
         .expect("Failed to get Unicorn endpoint");
 
-    let mut unicorn_client = DeviceClient::new(glenda::cap::Endpoint::from(unicorn_ep_slot));
+    let mut dev_client = DeviceClient::new(DEVICE_CAP);
     let mut res_client = ResourceClient::new(MONITOR_CAP);
+
+    res_client
+        .get_cap(Badge::null(), ResourceType::Endpoint, INIT_ENDPOINT, INIT_SLOT)
+        .expect("Failed to get init endpoint");
+
+    let mut init_client = InitClient::new(INIT_CAP);
 
     // 6. Take over Kernel Console
     res_client
@@ -52,8 +56,13 @@ fn main() -> usize {
         .expect("Failed to alloc prism endpoint");
 
     // 3. Setup Prism Server
-    let device_manager = DeviceManager::new(&mut unicorn_client);
-    let mut server = PrismServer::new(device_manager, &mut res_client, &mut cspace_mgr);
+    let mut server = PrismServer::new(
+        &mut dev_client,
+        &mut res_client,
+        &mut cspace_mgr,
+        &mut init_client,
+        KERNEL_CAP,
+    );
 
     // 7. Run Server Loop
     server.listen(ENDPOINT_CAP, RECV_SLOT, REPLY_SLOT).expect("Failed to listen");
@@ -62,6 +71,5 @@ fn main() -> usize {
     server.init().expect("Failed to initialize Prism Server");
 
     server.run().expect("Server loop failed");
-
     0
 }

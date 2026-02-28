@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use glenda::protocol::terminal::SeatDesc;
 
 /// Represents a Seat (Input/Output grouping).
@@ -8,6 +8,7 @@ pub struct Seat {
     pub name: String,
     pub active_vt: Option<u32>,
     pub input_devices: Vec<String>,
+    pub output_devices: Vec<String>,
 }
 
 impl Seat {
@@ -17,6 +18,7 @@ impl Seat {
             name: String::from(name),
             active_vt: None,
             input_devices: Vec::new(),
+            output_devices: Vec::new(),
         }
     }
 

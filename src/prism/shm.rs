@@ -1,4 +1,4 @@
-use crate::layout::SHM_CLIENT_POOL_VA;
+use crate::layout::{SHM_CLIENT_POOL_VA, SHM_VA};
 use glenda::cap::CapPtr;
 use glenda::client::ResourceClient;
 use glenda::error::Error;
@@ -14,10 +14,7 @@ pub struct MemoryPool {
 
 impl MemoryPool {
     pub fn new() -> Self {
-        Self {
-            dma_pool: ShmPool::new(glenda::mem::SERVICE_POOL_VA),
-            client_pool: ShmPool::new(SHM_CLIENT_POOL_VA),
-        }
+        Self { dma_pool: ShmPool::new(SHM_VA), client_pool: ShmPool::new(SHM_CLIENT_POOL_VA) }
     }
 
     /// Allocate a frame from the central resource manager and map it.

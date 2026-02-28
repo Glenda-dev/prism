@@ -1,16 +1,16 @@
 use crate::config::ConfigLoader;
 use crate::prism::PrismServer;
-use crate::prism::seat::Seat;
-use crate::prism::shm::ShmType;
 use crate::prism::vt::VirtualTerminal;
-use glenda::cap::{CapPtr, Endpoint, Reply};
+use glenda::cap::{CapPtr, Endpoint, Reply, Rights};
 use glenda::error::Error;
-use glenda::interface::{DeviceService, SystemService, VirtualTerminalService};
-use glenda::io::uring::IoUringServer;
-use glenda::ipc::server::handle_call;
+use glenda::interface::{DeviceService, InitService, ResourceService, SystemService};
+use glenda::ipc::server::{handle_call, handle_cap_call, handle_notify};
 use glenda::ipc::{Badge, MsgTag, UTCB};
 use glenda::protocol;
 use glenda::protocol::device::{HookTarget, LogicDeviceType};
+use glenda::protocol::init::ServiceState;
+use glenda::protocol::resource::{ResourceType, VT_ENDPOINT};
+use glenda::utils::manager::CSpaceService;
 use psf2_font::TERMINUS_FONT_DATA;
 
 impl SystemService for PrismServer<'_> {
@@ -29,83 +29,65 @@ impl SystemService for PrismServer<'_> {
         }
 
         let hook_ep = self.endpoint.cap();
-        self.device_manager.unicorn.hook(
-            Badge::null(),
-            HookTarget::Type(LogicDeviceType::Fb),
-            hook_ep,
-        )?;
-        self.device_manager.unicorn.hook(
-            Badge::null(),
-            HookTarget::Type(LogicDeviceType::Uart),
-            hook_ep,
-        )?;
-        self.device_manager.unicorn.hook(
-            Badge::null(),
-            HookTarget::Type(LogicDeviceType::Input),
-            hook_ep,
-        )?;
-
-        // Initial sync for already registered devices
-        if let Err(e) = self.device_manager.sync_devices(self.res_client, self.cspace) {
-            log!("Initial device sync failed: {:?}", e);
-        }
-
-        // Setup initial seat and default VT
-        if self.seats.is_empty() {
-            self.seats.push(Seat::new(0, "null"));
-            self.seats[0].active_vt = Some(0);
-        }
+        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Fb), hook_ep)?;
+        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Uart), hook_ep)?;
+        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Input), hook_ep)?;
 
         log!("Initialized with System Console VT");
         Ok(())
     }
 
-    fn listen(&mut self, ep: Endpoint, reply: CapPtr, _recv: CapPtr) -> Result<(), Error> {
+    fn listen(&mut self, ep: Endpoint, reply: CapPtr, recv: CapPtr) -> Result<(), Error> {
         self.endpoint = ep;
-        self.reply = reply;
+        self.reply = Reply::from(reply);
+        self.recv = recv;
+        self.res_client.register_cap(
+            Badge::null(),
+            ResourceType::Endpoint,
+            VT_ENDPOINT,
+            ep.cap(),
+        )?;
         Ok(())
     }
 
     fn run(&mut self) -> Result<(), Error> {
-        loop {
+        self.running = true;
+        self.init_client.report_service(Badge::null(), ServiceState::Running)?;
+        while self.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
-
+            let _ = self.cspace.root().delete(self.recv);
+            utcb.set_reply_window(self.reply.cap());
+            utcb.set_recv_window(self.recv);
             match self.endpoint.recv(&mut utcb) {
-                Ok(_) => {}
+                Ok(b) => b,
                 Err(e) => {
                     error!("Recv error: {:?}", e);
                     continue;
                 }
-            }
+            };
 
+            let badge = utcb.get_badge();
+            let proto = utcb.get_msg_tag().proto();
+            let label = utcb.get_msg_tag().label();
             match self.dispatch(&mut utcb) {
-                Ok(()) => {
-                    let _ = self.reply(&mut utcb);
-                }
-                Err(Error::Success) => {
-                    // Handled notification, skip reply
-                }
+                Ok(()) => {}
                 Err(e) => {
-                    let badge = utcb.get_badge();
-                    let tag = utcb.get_msg_tag();
-                    log!(
-                        "Dispatch error: {:?} badge={}, proto={:#x}, label={:#x}",
-                        e,
-                        badge,
-                        tag.proto(),
-                        tag.label()
+                    if e == Error::Success {
+                        continue;
+                    }
+                    error!(
+                        "Failed to dispatch message for {}: {:?}, proto={:#x}, label={:#x}",
+                        badge, e, proto, label
                     );
                     utcb.set_msg_tag(MsgTag::err());
                     utcb.set_mr(0, e as usize);
-                    let _ = self.reply(&mut utcb);
                 }
+            };
+            if let Err(e) = self.reply(utcb) {
+                error!("Reply error: {:?}", e);
             }
-
-            // Reply to caller
-            let _ = Reply::from(self.reply).reply(&mut utcb);
         }
-        #[allow(unreachable_code)]
         Ok(())
     }
 
@@ -120,28 +102,44 @@ impl SystemService for PrismServer<'_> {
                 handle_call(u, |_| s.handle_console_get_char())
             },
 
-            // Input protocol with io_uring support
-            (protocol::INPUT_PROTO, protocol::input::SETUP_URING) => |s: &mut Self, u: &mut UTCB| {
+            // Terminal Service (Per-VT)
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_BAUD) => |_s: &mut Self, u: &mut UTCB| {
+                let baud = u.get_mr(0);
                 let badge = u.get_badge();
-                let entries = u.get_mr(0) as u32;
-                handle_call(u, |u| {
-                    let recv = u.get_recv_window();
-                    let size = (entries as usize * 80 + 4095) & !4095;
-                    let shm = s.mem_pool.alloc_shm(&mut s.res_client, size, ShmType::Regular, recv)?;
-
-                    use glenda::io::uring::IoUringBuffer;
-                    let ring = unsafe { IoUringBuffer::new(shm.as_ptr(), size, entries, entries) };
-                    let ring_server = IoUringServer::new(ring);
-
-                    s.input_rings.insert(badge, (ring_server, shm));
-                    // Default associate with Seat 0 for now
-                    s.seat_map.insert(badge, 0);
-
-                    Ok(shm.frame().cap().bits())
+                handle_call(u, |_| {
+                    log!("Setting baudrate to {} for VT {}", baud, badge.bits());
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_LCR) => |_s: &mut Self, u: &mut UTCB| {
+                let lcr = u.get_mr(0);
+                let badge = u.get_badge();
+                handle_call(u, |_| {
+                    log!("Setting LCR to {:#x} for VT {}", lcr, badge.bits());
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_IOCTL) => |_s: &mut Self, u: &mut UTCB| {
+                let req = u.get_mr(0);
+                let arg = u.get_mr(1);
+                let badge = u.get_badge();
+                handle_call(u, |_| {
+                    log!("Generic IOCTL req={:#x} arg={:#x} for VT {}", req, arg, badge.bits());
+                    Ok(0usize)
                 })
             },
 
-            // Handle InputEvent (potentially pushed from unicorn or other drivers)
+            // Input protocol with io_uring support (Prism now acts as client for physical devices)
+            (protocol::INPUT_PROTO, protocol::input::SETUP_URING) => |_s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |_u| {
+                    // Physical input devices now use InputClient/UartClient and are detected in sync_devices.
+                    // SETUP_URING for Prism as a server is disabled.
+                    let res: Result<usize, Error> = Err(Error::NotImplemented);
+                    res
+                })
+            },
+
+            // Handle InputEvent (potentially pushed from dev_client or other drivers)
             (protocol::INPUT_PROTO, protocol::input::READ_EVENT) => |_s, u: &mut UTCB| {
                 // Return a single event from default seat for now
                 handle_call(u, |_| {
@@ -153,12 +151,19 @@ impl SystemService for PrismServer<'_> {
             // Terminal VTS protocol
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_ALLOC_VT) => |s: &mut Self, u: &mut UTCB| {
                 let name = unsafe { u.read_str()? };
-                handle_call(u, |_| {
+                handle_cap_call(u, |u| {
                     let id = s.vts.len() as u32;
                     let vt = VirtualTerminal::new(id, &name);
                     s.vts.push(vt);
+
+                    // Create an individual endpoint for this VT, badged with VT ID
+                    let slot = s.cspace.alloc(s.res_client)?;
+                    let badge = Badge::new(id as usize);
+                    s.cspace.root().mint(s.endpoint.cap(), slot, badge, Rights::ALL)?;
+
                     log!("Created VT {} ({})", id, name);
-                    Ok(id as usize)
+                    u.set_mr(0, id as usize);
+                    Ok(slot)
                 })
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_SWITCH_VT) => |s: &mut Self, u: &mut UTCB| {
@@ -168,15 +173,16 @@ impl SystemService for PrismServer<'_> {
             },
 
             (protocol::KERNEL_PROTO, protocol::kernel::NOTIFY) => |s: &mut Self, u: &mut UTCB| {
-                use glenda::io::uring::NOTIFY_IO_URING_SQ;
-                use glenda::ipc::server::handle_notify;
                 let badge_bits = u.get_badge().bits();
                 handle_notify(u, |_u| {
                     if badge_bits & glenda::protocol::device::NOTIFY_HOOK != 0 {
-                        let _ = s.device_manager.sync_devices(s.res_client, s.cspace);
+                        if let Err(e) = s.sync_devices() {
+                            log!("Failed to sync and attach devices: {:?}", e);
+                        }
                     }
-                    if badge_bits & NOTIFY_IO_URING_SQ != 0 {
-                        let _ = s.poll_input_rings();
+                    // For UART/InputClient, any notification might mean new data
+                    if let Err(e) = s.poll_input_rings() {
+                        log!("Failed to poll input rings: {:?}", e);
                     }
                     Ok(())
                 })?;
@@ -186,9 +192,12 @@ impl SystemService for PrismServer<'_> {
         res
     }
 
-    fn reply(&mut self, _utcb: &mut UTCB) -> Result<(), Error> {
-        Ok(())
+    fn reply(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
+        self.reply.reply(utcb)
     }
 
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        self.running = false;
+        let _ = self.init_client.report_service(Badge::null(), ServiceState::Stopped);
+    }
 }
