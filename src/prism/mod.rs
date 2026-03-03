@@ -17,7 +17,8 @@ use glenda::error::Error;
 use glenda::interface::DeviceService;
 use glenda::ipc::{Badge, UTCB};
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
-use glenda::utils::manager::{CSpaceManager, CSpaceService};
+use glenda::interface::CSpaceService;
+use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 use glenda_drivers::client::fb::FbClient;
 use glenda_drivers::client::input::InputClient;
 use glenda_drivers::client::uart::UartClient;
@@ -64,6 +65,7 @@ pub struct PrismServer<'a> {
     pub seat_map: BTreeMap<Badge, u32>, // Badge -> Seat ID
     pub pending_input: BTreeMap<String, Vec<u8>>, // Device Name -> Input Buffer
     pub cspace: &'a mut CSpaceManager,
+    pub vspace: &'a mut VSpaceManager,
     pub init_client: &'a mut InitClient,
     pub kernel_cap: Kernel,
 }
@@ -73,6 +75,7 @@ impl<'a> PrismServer<'a> {
         dev_client: &'a mut DeviceClient,
         res_client: &'a mut ResourceClient,
         cspace: &'a mut CSpaceManager,
+        vspace: &'a mut VSpaceManager,
         init_client: &'a mut InitClient,
         kernel_cap: Kernel,
     ) -> Self {
@@ -92,6 +95,7 @@ impl<'a> PrismServer<'a> {
             seat_map: BTreeMap::new(),
             pending_input: BTreeMap::new(),
             cspace,
+            vspace,
             init_client,
             kernel_cap,
         };
@@ -253,7 +257,7 @@ impl<'a> PrismServer<'a> {
                         self.dev_client.alloc_logic(Badge::null(), LogicDeviceType::Fb, &name, slot)
                     {
                         let mut client = FbClient::new(ep);
-                        if let Err(e) = client.connect() {
+                        if let Err(e) = client.connect(self.vspace, self.cspace) {
                             log!("Failed to connect to FB {}: {:?}", name, e);
                             continue;
                         }
@@ -330,7 +334,7 @@ impl<'a> PrismServer<'a> {
                         slot,
                     ) {
                         let mut client = InputClient::new(ep);
-                        if let Err(e) = client.connect() {
+                        if let Err(e) = client.connect(self.vspace, self.cspace) {
                             log!("Failed to connect to Input {}: {:?}", name, e);
                             continue;
                         }
@@ -402,6 +406,8 @@ impl<'a> PrismServer<'a> {
         // Prepare data shm (READ buffer)
         let data_size = 4096;
         let data_shm = self.mem_pool.alloc_shm(
+            self.vspace,
+            self.cspace,
             self.res_client,
             data_size,
             glenda::mem::pool::ShmType::Regular,
@@ -421,7 +427,7 @@ impl<'a> PrismServer<'a> {
         // 3. Connect (Performs SETUP_RING and SETUP_BUFFER)
         // Ensure recv slots are NOT cleared - they are used by UartClient internally
         // after the call returns.
-        client.connect()?;
+        client.connect(self.vspace, self.cspace)?;
 
         let resource = DeviceResource {
             name: String::from(name),

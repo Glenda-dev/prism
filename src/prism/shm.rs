@@ -2,6 +2,7 @@ use crate::layout::{SHM_CLIENT_POOL_VA, SHM_VA};
 use glenda::cap::CapPtr;
 use glenda::client::ResourceClient;
 use glenda::error::Error;
+use glenda::interface::{CSpaceService, VSpaceService};
 pub use glenda::mem::pool::{MemoryPool as ShmPool, ShmType};
 pub use glenda::mem::shm::SharedMemory;
 
@@ -20,14 +21,20 @@ impl MemoryPool {
     /// Allocate a frame from the central resource manager and map it.
     pub fn alloc_shm(
         &mut self,
+        vspace: &mut dyn VSpaceService,
+        cspace: &mut dyn CSpaceService,
         res_client: &mut ResourceClient,
         size: usize,
         shm_type: ShmType,
         recv_slot: CapPtr,
     ) -> Result<SharedMemory, Error> {
         match shm_type {
-            ShmType::DMA => self.dma_pool.alloc_shm(res_client, size, shm_type, recv_slot),
-            ShmType::Regular => self.client_pool.alloc_shm(res_client, size, shm_type, recv_slot),
+            ShmType::DMA => {
+                self.dma_pool.alloc_shm(vspace, cspace, res_client, size, shm_type, recv_slot)
+            }
+            ShmType::Regular => {
+                self.client_pool.alloc_shm(vspace, cspace, res_client, size, shm_type, recv_slot)
+            }
         }
     }
 

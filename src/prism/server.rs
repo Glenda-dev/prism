@@ -10,7 +10,7 @@ use glenda::protocol;
 use glenda::protocol::device::{HookTarget, LogicDeviceType};
 use glenda::protocol::init::ServiceState;
 use glenda::protocol::resource::{ResourceType, VT_ENDPOINT};
-use glenda::utils::manager::CSpaceService;
+use glenda::interface::CSpaceService;
 use psf2_font::TERMINUS_FONT_DATA;
 
 impl SystemService for PrismServer<'_> {
@@ -18,10 +18,12 @@ impl SystemService for PrismServer<'_> {
         log!("Initializing...");
 
         // Load configuration and font
-        let mut config_loader = ConfigLoader::new(&mut self.res_client);
+        let mut config_loader =
+            ConfigLoader::new(&mut self.res_client, &mut self.cspace, &mut self.vspace);
         if let Ok(tty_config) = config_loader.load_tty_config() {
             let font_data = config_loader.load_font(tty_config.font.as_str());
-            self.set_font(font_data).map_err(|_| Error::MappingFailed)?;
+            let font_data_static: &'static [u8] = unsafe { core::mem::transmute(font_data) };
+            self.set_font(font_data_static).map_err(|_| Error::MappingFailed)?;
         } else {
             // Loading failed, fallback to default font and config
             let font_data = TERMINUS_FONT_DATA;
