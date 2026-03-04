@@ -1,8 +1,9 @@
 use crate::config::ConfigLoader;
 use crate::prism::PrismServer;
 use crate::prism::vt::VirtualTerminal;
-use glenda::cap::{CapPtr, Endpoint, Reply, Rights};
+use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply, Rights};
 use glenda::error::Error;
+use glenda::interface::CSpaceService;
 use glenda::interface::{DeviceService, InitService, ResourceService, SystemService};
 use glenda::ipc::server::{handle_call, handle_cap_call, handle_notify};
 use glenda::ipc::{Badge, MsgTag, UTCB};
@@ -10,7 +11,6 @@ use glenda::protocol;
 use glenda::protocol::device::{HookTarget, LogicDeviceType};
 use glenda::protocol::init::ServiceState;
 use glenda::protocol::resource::{ResourceType, VT_ENDPOINT};
-use glenda::interface::CSpaceService;
 use psf2_font::TERMINUS_FONT_DATA;
 
 impl SystemService for PrismServer<'_> {
@@ -58,7 +58,6 @@ impl SystemService for PrismServer<'_> {
         while self.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
-            let _ = self.cspace.root().delete(self.recv);
             utcb.set_reply_window(self.reply.cap());
             utcb.set_recv_window(self.recv);
             match self.endpoint.recv(&mut utcb) {
@@ -161,7 +160,7 @@ impl SystemService for PrismServer<'_> {
                     // Create an individual endpoint for this VT, badged with VT ID
                     let slot = s.cspace.alloc(s.res_client)?;
                     let badge = Badge::new(id as usize);
-                    s.cspace.root().mint(s.endpoint.cap(), slot, badge, Rights::ALL)?;
+                    CSPACE_CAP.mint(s.endpoint.cap(), slot, badge, Rights::ALL)?;
 
                     log!("Created VT {} ({})", id, name);
                     u.set_mr(0, id as usize);
