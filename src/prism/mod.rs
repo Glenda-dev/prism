@@ -19,11 +19,11 @@ use glenda::ipc::{Badge, UTCB};
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
 use glenda::interface::CSpaceService;
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
-use glenda_drivers::client::fb::FbClient;
-use glenda_drivers::client::input::InputClient;
-use glenda_drivers::client::uart::UartClient;
-use glenda_drivers::client::{RingParams, ShmParams};
-use glenda_drivers::interface::DriverClient;
+use glenda::drivers::client::fb::FbClient;
+use glenda::drivers::client::input::InputClient;
+use glenda::drivers::client::uart::UartClient;
+use glenda::drivers::client::{RingParams, ShmParams};
+use glenda::drivers::interface::DriverClient;
 
 /// Unified Device Client types supported by Prism
 pub enum DeviceClientKind {
@@ -327,28 +327,61 @@ impl<'a> PrismServer<'a> {
                 if !self.input_devices.contains_key(&name) {
                     log!("Found Input device: {}", name);
                     let slot = self.cspace.alloc(self.res_client)?;
-                    if let Ok(ep) = self.dev_client.alloc_logic(
-                        Badge::null(),
-                        LogicDeviceType::Input,
-                        &name,
-                        slot,
-                    ) {
-                        let mut client = InputClient::new(ep);
-                        if let Err(e) = client.connect(self.vspace, self.cspace) {
-                            log!("Failed to connect to Input {}: {:?}", name, e);
-                            continue;
-                        }
+                        if let Ok(ep) = self.dev_client.alloc_logic(
+                            Badge::null(),
+                            LogicDeviceType::Input,
+                            &name,
+                            slot,
+                        ) {
+                            // Setup Input device via io_uring
+                            let notify_ep = self.endpoint;
+                            let ring_recv_slot = self.cspace.alloc(self.res_client)?;
+                            let data_recv_slot = self.cspace.alloc(self.res_client)?;
 
-                        let resources = DeviceResource {
-                            name: name.clone(),
-                            kind: DeviceClientKind::Input(client),
-                            ring_frame: Frame::from(CapPtr::null()),
-                            data_frame: Frame::from(CapPtr::null()),
-                            endpoint: ep,
-                        };
-                        self.input_devices.insert(name.clone(), resources);
-                        new_devices.push((name, LogicDeviceType::Input));
-                    }
+                            let ring_params = RingParams {
+                                sq_entries: 16,
+                                cq_entries: 32,
+                                vaddr: 0x5040_0000 + self.input_devices.len() * 0x10_0000,
+                                size: 4096,
+                                notify_ep,
+                                recv_slot: ring_recv_slot,
+                            };
+
+                            let data_shm = self.mem_pool.alloc_shm(
+                                self.vspace,
+                                self.cspace,
+                                self.res_client,
+                                4096,
+                                glenda::mem::pool::ShmType::Regular,
+                                data_recv_slot,
+                            )?;
+
+                            let shm_params = ShmParams {
+                                frame: data_shm.frame().clone(),
+                                vaddr: data_shm.as_ptr() as usize,
+                                paddr: 0,
+                                size: 4096,
+                                recv_slot: data_recv_slot,
+                            };
+
+                            let mut client =
+                                InputClient::new(ep, self.res_client, ring_params, shm_params);
+
+                            if let Err(e) = client.connect(self.vspace, self.cspace) {
+                                log!("Failed to connect to Input {}: {:?}", name, e);
+                                continue;
+                            }
+
+                            let resources = DeviceResource {
+                                name: name.clone(),
+                                kind: DeviceClientKind::Input(client),
+                                ring_frame: Frame::from(ring_recv_slot),
+                                data_frame: data_shm.frame().clone(),
+                                endpoint: ep,
+                            };
+                            self.input_devices.insert(name.clone(), resources);
+                            new_devices.push((name, LogicDeviceType::Input));
+                        }
                 }
             }
         }
