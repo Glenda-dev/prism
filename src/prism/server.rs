@@ -16,7 +16,7 @@ use psf2_font::TERMINUS_FONT_DATA;
 impl SystemService for PrismServer<'_> {
     fn init(&mut self) -> Result<(), Error> {
         log!("Initializing...");
-
+        self.init_client.report_service(Badge::null(), ServiceState::Starting)?;
         // Load configuration and font
         let mut config_loader =
             ConfigLoader::new(&mut self.res_client, &mut self.cspace, &mut self.vspace);
@@ -35,7 +35,6 @@ impl SystemService for PrismServer<'_> {
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Uart), hook_ep)?;
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Input), hook_ep)?;
 
-        log!("Initialized with System Console VT");
         Ok(())
     }
 
@@ -54,7 +53,7 @@ impl SystemService for PrismServer<'_> {
 
     fn run(&mut self) -> Result<(), Error> {
         self.running = true;
-        self.init_client.report_service(Badge::null(), ServiceState::Running)?;
+
         while self.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();

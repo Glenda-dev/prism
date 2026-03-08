@@ -1,9 +1,11 @@
+pub mod device;
 pub mod mux;
 pub mod seat;
 pub mod server;
 pub mod shm;
 pub mod vt;
 
+use crate::prism::device::{DeviceClientKind, DeviceResource};
 use crate::prism::mux::Muxer;
 use crate::prism::seat::Seat;
 use crate::prism::shm::MemoryPool;
@@ -19,33 +21,14 @@ use glenda::drivers::client::uart::UartClient;
 use glenda::drivers::client::{RingParams, ShmParams};
 use glenda::drivers::interface::DriverClient;
 use glenda::error::Error;
-use glenda::interface::CSpaceService;
-use glenda::interface::DeviceService;
+use glenda::interface::{CSpaceService, DeviceService, InitService};
 use glenda::ipc::{Badge, UTCB};
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
-/// Unified Device Client types supported by Prism
-pub enum DeviceClientKind {
-    /// UART device (Input & Output)
-    Uart(UartClient),
-    /// Framebuffer device (Output)
-    Fb(FbClient),
-    /// Input device (Input via Client)
-    Input(InputClient),
-}
-
-/// A template structure to store device resources and control interfaces.
-pub struct DeviceResource {
-    pub name: String,
-    pub kind: DeviceClientKind,
-    pub ring_frame: Frame,
-    pub data_frame: Frame,
-    pub endpoint: Endpoint,
-}
-
 pub struct PrismServer<'a> {
     pub running: bool,
+    pub vt0_ready: bool,
     pub seats: Vec<Seat>,
     pub recv: CapPtr,
     pub vts: Vec<VirtualTerminal>,
@@ -81,6 +64,7 @@ impl<'a> PrismServer<'a> {
     ) -> Self {
         let mut server = Self {
             running: false,
+            vt0_ready: false,
             seats: Vec::new(),
             vts: Vec::new(),
             muxer: Muxer::new(),
@@ -119,8 +103,9 @@ impl<'a> PrismServer<'a> {
         // Output to default VT (System Console)
         if let Some(vt) = self.vts.get_mut(0) {
             vt.write_str(&s);
-            // After writing to VT, we should trigger a re-render
-            self.muxer.render_vt(vt);
+            // After writing to VT, unifed output via Muxer
+            self.muxer.output_to_devices(vt, &s, &mut self.input_devices, &mut self.output_devices);
+            self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
         }
         Ok(s.len())
     }
@@ -188,24 +173,68 @@ impl<'a> PrismServer<'a> {
             0 // Fallback to System Console
         };
 
+        // 1. Extract inputs
+        let mut inputs = Vec::new();
         if let Some(device) = self.input_devices.get_mut(name) {
             if let DeviceClientKind::Uart(client) = &mut device.kind {
-                while let Some(cqe) = client.peek_cqe() {
-                    if cqe.res > 0 {
-                        let vaddr = client.shm_params().vaddr;
+                while let Some(cqe) = client.pop_cqe() {
+                    // Check user_data to only process READ completions (user_data == 2)
+                    // WRITE completions have user_data == 1
+                    if cqe.user_data == 2 && cqe.res > 0 {
+                        let vaddr = client.shm_params().vaddr + 2048;
                         let count = cqe.res as usize;
-
-                        if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
-                            for i in 0..count {
-                                let c = unsafe { *((vaddr + i) as *const u8) };
-                                vt.input_buffer.push(c);
-                            }
-                            self.muxer.render_vt(vt);
+                        // For UART READ, SQEs were queued with len 1 and various offsets (or same vaddr)
+                        // Driver completes them one by one.
+                        for i in 0..count {
+                            inputs.push(unsafe { *((vaddr + i) as *const u8) });
                         }
-
-                        let _ = client.read_async(vaddr as u64, 1, 0);
+                        // Re-queue the read
+                        let _ = client.read_async(vaddr as u64, 1, 2);
                     }
                 }
+            }
+        }
+
+        // 2. Process UTF-8 and Echo in Prism
+        if !inputs.is_empty() {
+            if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
+                for &b in &inputs {
+                    // Primitive support for backspace \x7f or \x08
+                    if b == 0x7f || b == 0x08 {
+                        if !vt.input_buffer.is_empty() {
+                            vt.input_buffer.pop();
+                            // Echo backspace sequence
+                            let _ = self.muxer.output_to_devices(
+                                vt,
+                                "\x08 \x08",
+                                &mut self.input_devices,
+                                &mut self.output_devices,
+                            );
+                        }
+                        continue;
+                    }
+
+                    vt.input_buffer.push(b);
+
+                    // Echo back raw byte if it's printable ASCII or part of UTF-8 we'll handle
+                    // For now, simple ASCII echo.
+                    if b >= 32 && b < 127 {
+                        let _ = self.muxer.output_to_devices(
+                            vt,
+                            core::str::from_utf8(&[b]).unwrap_or(""),
+                            &mut self.input_devices,
+                            &mut self.output_devices,
+                        );
+                    } else if b == b'\r' {
+                        let _ = self.muxer.output_to_devices(
+                            vt,
+                            "\n",
+                            &mut self.input_devices,
+                            &mut self.output_devices,
+                        );
+                    }
+                }
+                self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
             }
         }
 
@@ -403,16 +432,25 @@ impl<'a> PrismServer<'a> {
                     _ => {}
                 }
             }
+        }
 
-            // Log device detection to VT0 (System Console)
-            if let Some(vt) = self.vts.get_mut(0) {
-                let log_msg = alloc::format!(
-                    "[Prism] New physical device detected: {}, type={:?}, bound to Seat 0\n",
-                    name,
-                    dev_type
-                );
-                vt.write_str(&log_msg);
-                self.muxer.render_vt(vt);
+        // Check if VT0 is ready to report running
+        if !self.vt0_ready {
+            let has_output = self.seats.get(0).map_or(false, |s| !s.output_devices.is_empty());
+            if has_output {
+                if let Some(vt) = self.vts.get_mut(0) {
+                    // Clear screen first time we get an output device
+                    self.muxer.clear_vt(vt, &mut self.input_devices, &mut self.output_devices);
+                    vt.write_str("Glenda OS - System Console Initialized.\n");
+                    self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
+
+                    // Report Running to init service
+                    let _ = self.init_client.report_service(
+                        Badge::null(),
+                        glenda::protocol::init::ServiceState::Running,
+                    );
+                    self.vt0_ready = true;
+                }
             }
         }
 
@@ -461,6 +499,9 @@ impl<'a> PrismServer<'a> {
         // Ensure recv slots are NOT cleared - they are used by UartClient internally
         // after the call returns.
         client.connect(self.vspace, self.cspace)?;
+
+        // Queue initial read
+        let _ = client.read_async((shm_params.vaddr + 2048) as u64, 1, 2);
 
         let resource = DeviceResource {
             name: String::from(name),

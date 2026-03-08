@@ -28,6 +28,7 @@ impl Seat {
             name: self.name.clone(),
             active_vt: self.active_vt,
             input_devices: self.input_devices.clone(),
+            output_devices: self.output_devices.clone(),
         }
     }
 }
