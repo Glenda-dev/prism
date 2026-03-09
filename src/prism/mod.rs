@@ -189,7 +189,7 @@ impl<'a> PrismServer<'a> {
                             inputs.push(unsafe { *((vaddr + i) as *const u8) });
                         }
                         // Re-queue the read
-                        let _ = client.read_async(vaddr as u64, 1, 2);
+                        let _ = client.read_async(vaddr as usize, 1, 2);
                     }
                 }
             }
@@ -501,7 +501,7 @@ impl<'a> PrismServer<'a> {
         client.connect(self.vspace, self.cspace)?;
 
         // Queue initial read
-        let _ = client.read_async((shm_params.vaddr + 2048) as u64, 1, 2);
+        let _ = client.read_async((shm_params.vaddr + 2048) as usize, 1, 2);
 
         let resource = DeviceResource {
             name: String::from(name),

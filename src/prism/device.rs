@@ -53,7 +53,7 @@ impl DeviceResource {
                             bytes.len(),
                         );
                     }
-                    client.write_async(shm_vaddr as u64, bytes.len() as u32, 1)?;
+                    client.write_async(shm_vaddr as usize, bytes.len() as u32, 1)?;
                 } else {
                     client.write(bytes)?;
                 }
