@@ -63,16 +63,17 @@ impl VirtualTerminal {
             } else if b == 0x1b {
                 // Escape character (ESC)
                 self.input_buffer.push(b);
-                self.write_str("^["); // Visual echo for ESC
-                echo_buf.extend_from_slice(b"^[");
+                // self.write_str("^["); // Visual echo for ESC
+                // echo_buf.extend_from_slice(b"^[");
             } else if b == b'\r' {
                 self.input_buffer.push(b'\n');
                 self.write_str("\n");
-                echo_buf.push(b'\n');
+                echo_buf.extend_from_slice(b"\r\n");
             } else {
                 #[cfg(feature = "utf8")]
                 {
-                    if let Some(decoded) = self.decoder.process_byte(b) {
+                    let decoded = self.decoder.process_byte(b);
+                    if !decoded.is_empty() {
                         for &ub in decoded.as_bytes() {
                             self.input_buffer.push(ub);
                         }

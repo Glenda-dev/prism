@@ -1,11 +1,7 @@
 use crate::config::ConfigLoader;
-use crate::prism::DeviceClientKind;
 use crate::prism::PrismServer;
 use crate::prism::vt::VirtualTerminal;
 use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply, Rights};
-use glenda::drivers::interface::FrameBufferDriver;
-use glenda::drivers::protocol::FB_PROTO;
-use glenda::drivers::protocol::fb;
 use glenda::error::Error;
 use glenda::interface::CSpaceService;
 use glenda::interface::{DeviceService, InitService, ResourceService, SystemService};
@@ -130,62 +126,6 @@ impl SystemService for PrismServer<'_> {
                 handle_call(u, |_| {
                     log!("Generic IOCTL req={:#x} arg={:#x} for VT {}", req, arg, badge.bits());
                     Ok(0usize)
-                })
-            },
-
-            // Input protocol with io_uring support (Prism now acts as client for physical devices)
-            (protocol::INPUT_PROTO, protocol::input::SETUP_URING) => |_s: &mut Self, u: &mut UTCB| {
-                handle_call(u, |_u| {
-                    // Physical input devices now use InputClient/UartClient and are detected in sync_devices.
-                    // SETUP_URING for Prism as a server is disabled.
-                    let res: Result<usize, Error> = Err(Error::NotImplemented);
-                    res
-                })
-            },
-
-            // Handle InputEvent (potentially pushed from dev_client or other drivers)
-            (protocol::INPUT_PROTO, protocol::input::READ_EVENT) => |_s, u: &mut UTCB| {
-                // Return a single event from default seat for now
-                handle_call(u, |_| {
-                     // TODO: implement classic poll
-                     Ok(0usize)
-                })
-            },
-
-            // FB Protocol support for clients (e.g. apps that want to draw things)
-            (FB_PROTO, fb::GET_INFO) => |s: &mut Self, u: &mut UTCB| {
-                if let Some(device) = s.output_devices.values().next() {
-                    if let DeviceClientKind::Fb(client) = &device.kind {
-                        let info = client.info();
-                        return handle_call(u, |u| unsafe { u.write_obj(&info) });
-                    }
-                }
-                handle_call(u, |_| {
-                    let res: Result<usize, Error> = Err(Error::NotFound);
-                    res
-                })
-            },
-            (FB_PROTO, fb::FLUSH) => |s: &mut Self, u: &mut UTCB| {
-                let x = u.get_mr(0);
-                let y = u.get_mr(1);
-                let w = u.get_mr(2);
-                let h = u.get_mr(3);
-                if let Some(device) = s.output_devices.values_mut().next() {
-                    if let DeviceClientKind::Fb(client) = &mut device.kind {
-                        let res = client.flush(x, y, w, h);
-                        return handle_call(u, |_| res);
-                    }
-                }
-                handle_call(u, |_| {
-                    let res: Result<usize, Error> = Err(Error::NotFound);
-                    res
-                })
-            },
-            (FB_PROTO, fb::SETUP_RING) => |_s: &mut Self, u: &mut UTCB| {
-                // Provide shared ring for zero-copy FB ops from client to Prism
-                handle_call(u, |_| {
-                    let res: Result<usize, Error> = Err(Error::NotImplemented);
-                    res
                 })
             },
 

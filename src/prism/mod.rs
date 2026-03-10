@@ -163,6 +163,7 @@ impl<'a> PrismServer<'a> {
     pub fn poll_input_rings(&mut self) -> Result<(), Error> {
         // Poll input devices (both Rings where Prism is server and Uarts where Prism is client)
         let mut uarts_to_process = Vec::new();
+        let mut vts_to_render = alloc::collections::BTreeSet::new();
 
         for (name, device) in &self.input_devices {
             match &device.kind {
@@ -177,13 +178,20 @@ impl<'a> PrismServer<'a> {
 
         // Handle UART events
         for name in uarts_to_process {
-            self.process_uart_ring(&name)?;
+            if let Some(vt_id) = self.process_uart_ring(&name)? {
+                vts_to_render.insert(vt_id);
+            }
+        }
+
+        // Batch render all affected VTs
+        for vt_id in vts_to_render {
+            let _ = self.muxer.render_vt(vt_id);
         }
 
         Ok(())
     }
 
-    fn process_uart_ring(&mut self, name: &str) -> Result<(), Error> {
+    fn process_uart_ring(&mut self, name: &str) -> Result<Option<usize>, Error> {
         // Find which seat this UART belongs to, then find the active VT of that seat
         let mut seat_id = None;
         for seat in self.muxer.seats.iter() {
@@ -203,21 +211,23 @@ impl<'a> PrismServer<'a> {
         let mut inputs = Vec::new();
         if let Some(device) = self.input_devices.get_mut(name) {
             if let DeviceClientKind::Uart(client) = &mut device.kind {
+                // Poll all pending CQEs
                 while let Some(cqe) = client.pop_cqe() {
-                    // Check user_data to only process READ completions (user_data == 2)
-                    // WRITE completions have user_data == 1
-                    if cqe.user_data == 2 && cqe.res > 0 {
-                        let vaddr = client.shm_params().vaddr + 2048;
-                        let count = cqe.res as usize;
-                        // For UART READ, SQEs were queued with len 1 and various offsets (or same vaddr)
-                        // Driver completes them one by one.
-                        for i in 0..count {
-                            let b = unsafe { *((vaddr + i) as *const u8) };
-                            inputs.push(b);
+                    // UART Design: IOURING_OP_READ acts as a trigger to check RX ring
+                    if cqe.user_data == 2 {
+                        let mut buf = [0u8; 1024];
+                        let read = client.pop_shm_ring(&mut buf);
+                        if read > 0 {
+                            inputs.extend_from_slice(&buf[..read]);
                         }
-                        // Re-queue the read - we request a large buffer (e.g., 1024) to allow driver to push multiple bytes
-                        let _ = client.read_async(vaddr as usize, 1024, 2);
                     }
+                }
+
+                // If no CQE, we still check the RX ring periodically as a fallback or optimization
+                let mut buf = [0u8; 256];
+                let read = client.pop_shm_ring(&mut buf);
+                if read > 0 {
+                    inputs.extend_from_slice(&buf[..read]);
                 }
             }
         }
@@ -244,11 +254,11 @@ impl<'a> PrismServer<'a> {
             }
 
             if found_vt {
-                let _ = self.muxer.render_vt(active_vt_id);
+                return Ok(Some(active_vt_id));
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn process_ring(&mut self, _badge: Badge) -> Result<(), Error> {
@@ -490,8 +500,8 @@ impl<'a> PrismServer<'a> {
         // after the call returns.
         client.connect(self.vspace, self.cspace)?;
 
-        // Queue initial read (1024 bytes)
-        let _ = client.read_async((shm_params.vaddr + 2048) as usize, 1024, 2);
+        // Queue initial Multi-shot read (1024 bytes)
+        let _ = client.read_multishot((shm_params.vaddr + 2048) as usize, 1024, 2);
 
         let resource = DeviceResource {
             name: String::from(name),
