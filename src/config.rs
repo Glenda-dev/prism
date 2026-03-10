@@ -3,8 +3,8 @@ use alloc::string::String;
 use glenda::client::ResourceClient;
 use glenda::error::Error;
 use glenda::interface::ResourceService;
-use glenda::ipc::Badge;
 use glenda::interface::VSpaceService;
+use glenda::ipc::Badge;
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 use serde::Deserialize;
 

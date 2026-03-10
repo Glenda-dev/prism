@@ -38,6 +38,10 @@ impl MemoryPool {
         }
     }
 
+    pub fn reserve_vaddr_dma(&self, size: usize) -> usize {
+        self.dma_pool.reserve(size)
+    }
+
     pub fn get_dma_pool(&self) -> &[SharedMemory] {
         self.dma_pool.shms()
     }

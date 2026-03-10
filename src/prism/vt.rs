@@ -1,8 +1,10 @@
 use crate::prism::PrismServer;
+#[cfg(feature = "utf8")]
+use crate::prism::utf8::Utf8Decoder;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use glenda::cap::{CapPtr, Endpoint, Frame};
+use glenda::cap::{CapPtr, Endpoint};
 use glenda::error::Error;
 use glenda::interface::VirtualTerminalService;
 use glenda::ipc::Badge;
@@ -10,20 +12,22 @@ use glenda::protocol::terminal::{TerminalDisplayMode, VTDesc, WindowSize};
 
 /// Logic for a Virtual Terminal (VT).
 pub struct VirtualTerminal {
-    pub id: u32,
+    pub id: usize,
     pub name: String,
     pub mode: TerminalDisplayMode,
     pub winsize: WindowSize,
     pub cursor: (u16, u16),
     pub grid: Vec<u32>, // Grid of Unicode chars (32-bit codepoints)
-    pub fb_frame: Option<Frame>,
-    pub endpoint: Option<Endpoint>,
-    pub seat_ids: Vec<u32>,
+    pub seat_ids: Vec<usize>,
     pub input_buffer: Vec<u8>,
+    #[cfg(feature = "utf8")]
+    pub decoder: Utf8Decoder,
+    pub paddr: usize,
+    pub vaddr: *mut u8,
 }
 
 impl VirtualTerminal {
-    pub fn new(id: u32, name: &str) -> Self {
+    pub fn new(id: usize, name: &str) -> Self {
         let cols = 80;
         let rows = 25;
         Self {
@@ -33,11 +37,60 @@ impl VirtualTerminal {
             winsize: WindowSize { rows, cols, xpixel: 800, ypixel: 600 },
             cursor: (0, 0),
             grid: vec![b' ' as u32; (cols * rows) as usize],
-            fb_frame: None,
-            endpoint: None,
             seat_ids: Vec::new(),
             input_buffer: Vec::new(),
+            #[cfg(feature = "utf8")]
+            decoder: Utf8Decoder::new(),
+            paddr: 0,
+            vaddr: core::ptr::null_mut(),
         }
+    }
+
+    pub fn set_buffer(&mut self, paddr: usize, vaddr: *mut u8) {
+        self.paddr = paddr;
+        self.vaddr = vaddr;
+    }
+
+    pub fn process_input_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut echo_buf = Vec::new();
+        for &b in bytes {
+            if b == 0x7f || b == 0x08 {
+                if !self.input_buffer.is_empty() {
+                    self.input_buffer.pop();
+                    self.write_str("\x08 \x08");
+                    echo_buf.extend_from_slice(b"\x08 \x08");
+                }
+            } else if b == 0x1b {
+                // Escape character (ESC)
+                self.input_buffer.push(b);
+                self.write_str("^["); // Visual echo for ESC
+                echo_buf.extend_from_slice(b"^[");
+            } else if b == b'\r' {
+                self.input_buffer.push(b'\n');
+                self.write_str("\n");
+                echo_buf.push(b'\n');
+            } else {
+                #[cfg(feature = "utf8")]
+                {
+                    if let Some(decoded) = self.decoder.process_byte(b) {
+                        for &ub in decoded.as_bytes() {
+                            self.input_buffer.push(ub);
+                        }
+                        self.write_str(&decoded);
+                        echo_buf.extend_from_slice(decoded.as_bytes());
+                    }
+                }
+                #[cfg(not(feature = "utf8"))]
+                {
+                    self.input_buffer.push(b);
+                    if b >= 32 && b < 127 {
+                        self.write_str(core::str::from_utf8(&[b]).unwrap());
+                        echo_buf.push(b);
+                    }
+                }
+            }
+        }
+        echo_buf
     }
 
     pub fn write_str(&mut self, s: &str) {
@@ -102,17 +155,16 @@ impl VirtualTerminalService for PrismServer<'_> {
         _badge: Badge,
         name: &str,
         _recv: CapPtr,
-    ) -> Result<(u32, Endpoint), Error> {
-        let id = self.vts.len() as u32;
-        let vt = VirtualTerminal::new(id, name);
-        self.vts.push(vt);
+    ) -> Result<(usize, Endpoint), Error> {
+        let vt = VirtualTerminal::new(0, name);
+        let id = self.muxer.add_vt(vt);
         log!("Created VT {} ({})", id, name);
         // In a real implementation, we would create a per-VT endpoint and grant it back
         Ok((id, Endpoint::from(CapPtr::null())))
     }
 
-    fn destroy_vt(&mut self, _badge: Badge, vt_id: u32) -> Result<(), Error> {
-        self.vts.retain(|v| v.id != vt_id);
+    fn destroy_vt(&mut self, _badge: Badge, vt_id: usize) -> Result<(), Error> {
+        self.muxer.vts.retain(|v| v.id != vt_id);
         Ok(())
     }
 
@@ -120,18 +172,18 @@ impl VirtualTerminalService for PrismServer<'_> {
         &mut self,
         _badge: Badge,
     ) -> Result<Vec<glenda::protocol::terminal::VTDesc>, Error> {
-        Ok(self.vts.iter().map(|v| v.to_desc()).collect())
+        Ok(self.muxer.vts.iter().map(|v| v.to_desc()).collect())
     }
 
     fn list_seats(
         &mut self,
         _badge: Badge,
     ) -> Result<Vec<glenda::protocol::terminal::SeatDesc>, Error> {
-        Ok(self.seats.iter().map(|s| s.to_desc()).collect())
+        Ok(self.muxer.seats.iter().map(|s| s.to_desc()).collect())
     }
 
-    fn switch_vt(&mut self, _badge: Badge, seat_id: u32, vt_id: u32) -> Result<(), Error> {
-        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == seat_id) {
+    fn switch_vt(&mut self, _badge: Badge, seat_id: usize, vt_id: usize) -> Result<(), Error> {
+        if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == seat_id) {
             seat.active_vt = Some(vt_id);
             log!("Switched seat {} to VT {}", seat_id, vt_id);
             Ok(())
@@ -140,8 +192,8 @@ impl VirtualTerminalService for PrismServer<'_> {
         }
     }
 
-    fn bind_seat(&mut self, _badge: Badge, seat_id: u32, vt_id: u32) -> Result<(), Error> {
-        if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
+    fn bind_seat(&mut self, _badge: Badge, seat_id: usize, vt_id: usize) -> Result<(), Error> {
+        if let Some(vt) = self.muxer.vts.iter_mut().find(|v| v.id == vt_id) {
             vt.seat_ids.push(seat_id);
             Ok(())
         } else {
@@ -152,10 +204,10 @@ impl VirtualTerminalService for PrismServer<'_> {
     fn assign_device_to_seat(
         &mut self,
         _badge: Badge,
-        seat_id: u32,
+        seat_id: usize,
         device_name: &str,
     ) -> Result<(), Error> {
-        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == seat_id) {
+        if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == seat_id) {
             seat.input_devices.push(alloc::string::String::from(device_name));
             Ok(())
         } else {
@@ -166,10 +218,10 @@ impl VirtualTerminalService for PrismServer<'_> {
     fn revoke_device_from_seat(
         &mut self,
         _badge: Badge,
-        seat_id: u32,
+        seat_id: usize,
         device_name: &str,
     ) -> Result<(), Error> {
-        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == seat_id) {
+        if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == seat_id) {
             seat.input_devices.retain(|d| d != device_name);
             Ok(())
         } else {

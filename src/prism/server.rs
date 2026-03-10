@@ -1,7 +1,11 @@
 use crate::config::ConfigLoader;
+use crate::prism::DeviceClientKind;
 use crate::prism::PrismServer;
 use crate::prism::vt::VirtualTerminal;
 use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply, Rights};
+use glenda::drivers::interface::FrameBufferDriver;
+use glenda::drivers::protocol::FB_PROTO;
+use glenda::drivers::protocol::fb;
 use glenda::error::Error;
 use glenda::interface::CSpaceService;
 use glenda::interface::{DeviceService, InitService, ResourceService, SystemService};
@@ -53,7 +57,7 @@ impl SystemService for PrismServer<'_> {
 
     fn run(&mut self) -> Result<(), Error> {
         self.running = true;
-
+        self.init_client.report_service(Badge::null(), ServiceState::Running)?;
         while self.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
@@ -148,28 +152,69 @@ impl SystemService for PrismServer<'_> {
                 })
             },
 
+            // FB Protocol support for clients (e.g. apps that want to draw things)
+            (FB_PROTO, fb::GET_INFO) => |s: &mut Self, u: &mut UTCB| {
+                if let Some(device) = s.output_devices.values().next() {
+                    if let DeviceClientKind::Fb(client) = &device.kind {
+                        let info = client.info();
+                        return handle_call(u, |u| unsafe { u.write_obj(&info) });
+                    }
+                }
+                handle_call(u, |_| {
+                    let res: Result<usize, Error> = Err(Error::NotFound);
+                    res
+                })
+            },
+            (FB_PROTO, fb::FLUSH) => |s: &mut Self, u: &mut UTCB| {
+                let x = u.get_mr(0);
+                let y = u.get_mr(1);
+                let w = u.get_mr(2);
+                let h = u.get_mr(3);
+                if let Some(device) = s.output_devices.values_mut().next() {
+                    if let DeviceClientKind::Fb(client) = &mut device.kind {
+                        let res = client.flush(x, y, w, h);
+                        return handle_call(u, |_| res);
+                    }
+                }
+                handle_call(u, |_| {
+                    let res: Result<usize, Error> = Err(Error::NotFound);
+                    res
+                })
+            },
+            (FB_PROTO, fb::SETUP_RING) => |_s: &mut Self, u: &mut UTCB| {
+                // Provide shared ring for zero-copy FB ops from client to Prism
+                handle_call(u, |_| {
+                    let res: Result<usize, Error> = Err(Error::NotImplemented);
+                    res
+                })
+            },
+
             // Terminal VTS protocol
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_ALLOC_VT) => |s: &mut Self, u: &mut UTCB| {
                 let name = unsafe { u.read_str()? };
                 handle_cap_call(u, |u| {
-                    let id = s.vts.len() as u32;
-                    let vt = VirtualTerminal::new(id, &name);
-                    s.vts.push(vt);
+                    let vt = VirtualTerminal::new(0, &name);
+                    let id = s.muxer.add_vt(vt);
 
                     // Create an individual endpoint for this VT, badged with VT ID
                     let slot = s.cspace.alloc(s.res_client)?;
-                    let badge = Badge::new(id as usize);
+                    let badge = Badge::new(id);
                     CSPACE_CAP.mint(s.endpoint.cap(), slot, badge, Rights::ALL)?;
 
                     log!("Created VT {} ({})", id, name);
-                    u.set_mr(0, id as usize);
+                    u.set_mr(0, id);
                     Ok(slot)
                 })
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_SWITCH_VT) => |s: &mut Self, u: &mut UTCB| {
-                let seat_id = u.get_mr(0) as u32;
-                let vt_id = u.get_mr(1) as u32;
+                let seat_id = u.get_mr(0);
+                let vt_id = u.get_mr(1);
                 handle_call(u, |u| s.switch_vt(u.get_badge(), seat_id, vt_id))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::VTS_SET_EXCLUSIVE) => |s: &mut Self, u: &mut UTCB| {
+                let seat_id = u.get_mr(0);
+                let exclusive = u.get_mr(1) != 0;
+                handle_call(u, |u| s.set_exclusive(u.get_badge(), seat_id, exclusive))
             },
 
             (protocol::KERNEL_PROTO, protocol::kernel::NOTIFY) => |s: &mut Self, u: &mut UTCB| {

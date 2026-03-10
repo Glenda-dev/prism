@@ -13,3 +13,7 @@ postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 num_enum = { version = "0.7", default-features = false }
 psf2-font = "0.1.1"
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[features]
+default = []
+utf8 = []

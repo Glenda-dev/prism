@@ -1,95 +1,134 @@
+use crate::prism::device::DeviceResource;
 use crate::prism::seat::Seat;
 use crate::prism::vt::VirtualTerminal;
-use crate::renderer::FramebufferRenderer;
-use crate::prism::device::DeviceResource;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
+use glenda::error::Error;
 
 /// Multiplexer for terminal input routing and output mapping.
-pub struct Muxer {
-    pub renderer: Option<FramebufferRenderer>,
+pub struct Muxer<'a> {
+    pub vts: Vec<VirtualTerminal>,
+    pub seats: Vec<Seat<'a>>,
+    pub vt_to_seats: BTreeMap<usize, Vec<usize>>, // VT ID -> List of Seat IDs
+    next_vt_id: usize,
+    next_seat_id: usize,
 }
 
-impl Muxer {
+impl<'a> Muxer<'a> {
     pub fn new() -> Self {
-        Self { renderer: None }
+        Self {
+            vts: Vec::new(),
+            seats: Vec::new(),
+            vt_to_seats: BTreeMap::new(),
+            next_vt_id: 0,
+            next_seat_id: 0,
+        }
     }
 
-    pub fn set_renderer(&mut self, renderer: FramebufferRenderer) {
-        self.renderer = Some(renderer);
-    }
+    /// Dispatches output to all devices associated with the VT.
+    /// If a device is a UART, it sends the raw bytes (ANSI stream).
+    pub fn output_to_devices(
+        &mut self,
+        vt_id: usize,
+        data: &[u8],
+        input_devices: &mut BTreeMap<String, DeviceResource>,
+        output_devices: &mut BTreeMap<String, DeviceResource>,
+    ) -> Result<(), Error> {
+        if let Some(seat_ids) = self.vt_to_seats.get(&vt_id) {
+            for &sid in seat_ids {
+                if let Some(seat) = self.seats.iter().find(|s| s.id == sid) {
+                    // Only output if the seat is actively viewing this VT
+                    if seat.output_devices.is_empty() {
+                        warn!(
+                            "No output devices bound to Seat {} (attempted to write to VT {})",
+                            sid, vt_id
+                        );
+                    }
 
-    pub fn load_font(&mut self, data: &'static [u8]) -> Result<(), ()> {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.load_font(data)?;
+                    for dev_name in &seat.output_devices {
+                        // Search in both maps (UARTs are often in input_devices due to setup)
+                        if let Some(dev) = output_devices.get_mut(dev_name) {
+                            let _ = dev.write_raw(data);
+                        } else if let Some(dev) = input_devices.get_mut(dev_name) {
+                            let _ = dev.write_raw(data);
+                        } else {
+                            warn!("Output device {} bound to Seat {} was not found", dev_name, sid);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
-    pub fn handle_input(&mut self, _seat: &Seat, _device: &str, _data: &[u8]) {
+
+    pub fn add_vt(&mut self, mut vt: VirtualTerminal) -> usize {
+        let id = self.next_vt_id;
+        vt.id = id;
+        self.vts.push(vt);
+        self.next_vt_id += 1;
+        id
     }
 
-    pub fn clear_vt(&mut self, vt: &mut VirtualTerminal, input_devices: &mut BTreeMap<String, DeviceResource>, output_devices: &mut BTreeMap<String, DeviceResource>) {
+    pub fn add_seat(&mut self, mut seat: Seat<'a>) -> usize {
+        let id = self.next_seat_id;
+        seat.id = id;
+        self.seats.push(seat);
+        self.next_seat_id += 1;
+        id
+    }
+
+    pub fn bind_vt_to_seat(&mut self, vt_id: usize, seat_id: usize) {
+        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == seat_id) {
+            seat.active_vt = Some(vt_id);
+            self.vt_to_seats.entry(vt_id).or_insert_with(Vec::new).push(seat_id);
+        }
+    }
+
+    pub fn load_font(&mut self, data: &'static [u8]) -> Result<(), Error> {
+        for seat in self.seats.iter_mut() {
+            for r in seat.renderers.iter_mut() {
+                r.load_font(data)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn clear_vt(&mut self, vt_id: usize) -> Result<(), Error> {
+        let vt = self.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
         vt.grid.fill(b' ' as u32);
         vt.cursor = (0, 0);
 
-        // Clear FB if we have one assigned
-        if let Some(renderer) = self.renderer.as_mut() {
-             // Fill screen with background color
-             let bg_color = 0x00000000;
-             for y in 0..renderer.height {
-                 for x in 0..renderer.width {
-                     renderer.draw_pixel(x, y, bg_color);
-                 }
-             }
-        }
-
-        // Send clear sequence to UARTs (ANSI clear)
-        let clear_seq = "\x1b[2J\x1b[H";
-        self.output_to_devices(vt, clear_seq, input_devices, output_devices);
-    }
-
-    /// Output string to all output devices associated with VT's seats
-    pub fn output_to_devices(&mut self, vt: &VirtualTerminal, s: &str, input_devices: &mut BTreeMap<String, DeviceResource>, output_devices: &mut BTreeMap<String, DeviceResource>) {
-        // Simple logic: if it's VT0 (System VT), output to all devices on Seat 0
-        // In a more complex system, we'd lookup which seats this VT is bound to.
-        if vt.id == 0 {
-             // For each device in input/output maps, if they are UARTs, write to them
-             for dev in input_devices.values_mut() {
-                 if dev.is_output() {
-                     let _ = dev.write_str(s);
-                 }
-             }
-             for dev in output_devices.values_mut() {
-                 if dev.is_output() {
-                     let _ = dev.write_str(s);
-                 }
-             }
-        }
-    }
-
-    /// Mix/Compose outputs for current display.
-    pub fn render_vt(&mut self, vt: &VirtualTerminal, _input_devices: &mut BTreeMap<String, DeviceResource>, _output_devices: &mut BTreeMap<String, DeviceResource>) {
-        // FB Rendering
-        if let Some(renderer) = self.renderer.as_mut() {
-            // Background fill
-            let bg_color = 0x00000000;
-            let fg_color = 0x00FFFFFF;
-
-            for r in 0..vt.winsize.rows as usize {
-                for c in 0..vt.winsize.cols as usize {
-                    let char_idx = r * vt.winsize.cols as usize + c;
-                    if let Some(ch_u32) = vt.grid.get(char_idx) {
-                        if let Some(ch) = core::char::from_u32(*ch_u32) {
-                            renderer.draw_char(c * 8, r * 16, ch, fg_color, bg_color);
+        // Seat renderers clear
+        if let Some(seat_ids) = self.vt_to_seats.get(&vt_id) {
+            for &sid in seat_ids {
+                if let Some(seat) = self.seats.iter_mut().find(|s| s.id == sid) {
+                    if seat.active_vt == Some(vt_id) {
+                        for r in seat.renderers.iter_mut() {
+                            r.clear()?;
                         }
                     }
                 }
             }
         }
 
-        // For UARTs, the render_vt call usually follows a write_str to the VT.
-        // The write_str itself should have triggered output_to_devices.
-        // So we don't necessarily need to re-scan the grid for UARTs here unless it's a full refresh.
+        Ok(())
+    }
+
+    /// Mix/Compose outputs for current display.
+    pub fn render_vt(&mut self, vt_id: usize) -> Result<(), Error> {
+        let vt = self.vts.iter().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
+
+        // Delegate to mapped seats
+        if let Some(seat_ids) = self.vt_to_seats.get(&vt_id) {
+            for &sid in seat_ids {
+                if let Some(seat) = self.seats.iter_mut().find(|s| s.id == sid) {
+                    if seat.active_vt == Some(vt_id) {
+                        seat.render(vt)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
-

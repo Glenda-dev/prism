@@ -3,6 +3,8 @@ pub mod mux;
 pub mod seat;
 pub mod server;
 pub mod shm;
+#[cfg(feature = "utf8")]
+pub mod utf8;
 pub mod vt;
 
 use crate::prism::device::{DeviceClientKind, DeviceResource};
@@ -21,18 +23,17 @@ use glenda::drivers::client::uart::UartClient;
 use glenda::drivers::client::{RingParams, ShmParams};
 use glenda::drivers::interface::DriverClient;
 use glenda::error::Error;
-use glenda::interface::{CSpaceService, DeviceService, InitService};
+use glenda::interface::{CSpaceService, DeviceService};
 use glenda::ipc::{Badge, UTCB};
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
 pub struct PrismServer<'a> {
     pub running: bool,
-    pub vt0_ready: bool,
-    pub seats: Vec<Seat>,
+    pub seats: Vec<Seat<'a>>,
     pub recv: CapPtr,
     pub vts: Vec<VirtualTerminal>,
-    pub muxer: Muxer,
+    pub muxer: Muxer<'a>,
     pub dev_client: &'a mut DeviceClient,
 
     /// Unified input devices (UARTs, Keyboards, etc.) for high-frequency polling
@@ -64,7 +65,6 @@ impl<'a> PrismServer<'a> {
     ) -> Self {
         let mut server = Self {
             running: false,
-            vt0_ready: false,
             seats: Vec::new(),
             vts: Vec::new(),
             muxer: Muxer::new(),
@@ -85,36 +85,44 @@ impl<'a> PrismServer<'a> {
         };
 
         // Create Default Seat and VT (System Console)
-        server.seats.push(Seat::new(0, "System Seat"));
-        server.seats[0].active_vt = Some(0);
-        server.vts.push(VirtualTerminal::new(0, "System Console"));
+        let vt = VirtualTerminal::new(0, "System Console");
+        let vt_id = server.muxer.add_vt(vt);
+
+        let mut seat = Seat::new(0, "System Seat");
+        seat.active_vt = Some(vt_id);
+        // Ensure Seat 0 has System Console mapped for both input and output
+        server.muxer.add_seat(seat);
+        server.muxer.bind_vt_to_seat(vt_id, 0);
+
         server
     }
 
-    pub fn set_font(&mut self, data: &'static [u8]) -> Result<(), ()> {
-        if let Some(renderer) = self.muxer.renderer.as_mut() {
-            renderer.load_font(data)?;
-        }
-        Ok(())
+    pub fn set_font(&mut self, data: &'static [u8]) -> Result<(), Error> {
+        self.muxer.load_font(data)
     }
 
     pub fn handle_console_put_str(&mut self, utcb: &mut UTCB) -> Result<usize, Error> {
         let s = unsafe { utcb.read_str()? };
         // Output to default VT (System Console)
-        if let Some(vt) = self.vts.get_mut(0) {
+        if let Some(vt) = self.muxer.vts.get_mut(0) {
             vt.write_str(&s);
-            // After writing to VT, unifed output via Muxer
-            self.muxer.output_to_devices(vt, &s, &mut self.input_devices, &mut self.output_devices);
-            self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
         }
+        // Dispatch raw ANSI to physical devices (UARTs)
+        let _ = self.muxer.output_to_devices(
+            0,
+            s.as_bytes(),
+            &mut self.input_devices,
+            &mut self.output_devices,
+        );
+        let _ = self.muxer.render_vt(0);
         Ok(s.len())
     }
 
     pub fn handle_console_get_char(&mut self) -> Result<usize, Error> {
         // Return char from default seat's active VT
-        if let Some(seat) = self.seats.get(0) {
+        if let Some(seat) = self.muxer.seats.get(0) {
             if let Some(vt_id) = seat.active_vt {
-                if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
+                if let Some(vt) = self.muxer.vts.iter_mut().find(|v| v.id == vt_id) {
                     return Ok(vt.read_char().unwrap_or(0) as usize);
                 }
             }
@@ -122,16 +130,34 @@ impl<'a> PrismServer<'a> {
         Ok(0)
     }
 
-    pub fn switch_vt(&mut self, badge: Badge, seat_id: u32, vt_id: u32) -> Result<(), Error> {
+    pub fn switch_vt(&mut self, badge: Badge, seat_id: usize, vt_id: usize) -> Result<(), Error> {
         log!("Switch Seat {} to VT {} (requested by {:?})", seat_id, vt_id, badge);
-        if let Some(seat) = self.seats.get_mut(seat_id as usize) {
-            if self.vts.iter().any(|v| v.id == vt_id) {
+        if let Some(seat) = self.muxer.seats.get_mut(seat_id) {
+            if self.muxer.vts.iter().any(|v| v.id == vt_id) {
                 seat.active_vt = Some(vt_id);
                 // Trigger re-render of the whole seat might be needed, but for now we just switch
                 return Ok(());
             }
         }
         Err(Error::NotFound)
+    }
+
+    pub fn set_exclusive(
+        &mut self,
+        badge: Badge,
+        seat_id: usize,
+        exclusive: bool,
+    ) -> Result<(), Error> {
+        if let Some(seat) = self.muxer.seats.get_mut(seat_id) {
+            if exclusive {
+                seat.exclusive_owner = Some(badge);
+            } else {
+                seat.exclusive_owner = None;
+            }
+            Ok(())
+        } else {
+            Err(Error::NotFound)
+        }
     }
 
     pub fn poll_input_rings(&mut self) -> Result<(), Error> {
@@ -160,15 +186,15 @@ impl<'a> PrismServer<'a> {
     fn process_uart_ring(&mut self, name: &str) -> Result<(), Error> {
         // Find which seat this UART belongs to, then find the active VT of that seat
         let mut seat_id = None;
-        for (i, seat) in self.seats.iter().enumerate() {
+        for seat in self.muxer.seats.iter() {
             if seat.input_devices.contains(&String::from(name)) {
-                seat_id = Some(i);
+                seat_id = Some(seat.id);
                 break;
             }
         }
 
         let vt_id = if let Some(sid) = seat_id {
-            self.seats[sid].active_vt.unwrap_or(0)
+            self.muxer.seats.iter().find(|s| s.id == sid).and_then(|s| s.active_vt).unwrap_or(0)
         } else {
             0 // Fallback to System Console
         };
@@ -186,10 +212,11 @@ impl<'a> PrismServer<'a> {
                         // For UART READ, SQEs were queued with len 1 and various offsets (or same vaddr)
                         // Driver completes them one by one.
                         for i in 0..count {
-                            inputs.push(unsafe { *((vaddr + i) as *const u8) });
+                            let b = unsafe { *((vaddr + i) as *const u8) };
+                            inputs.push(b);
                         }
-                        // Re-queue the read
-                        let _ = client.read_async(vaddr as usize, 1, 2);
+                        // Re-queue the read - we request a large buffer (e.g., 1024) to allow driver to push multiple bytes
+                        let _ = client.read_async(vaddr as usize, 1024, 2);
                     }
                 }
             }
@@ -197,44 +224,27 @@ impl<'a> PrismServer<'a> {
 
         // 2. Process UTF-8 and Echo in Prism
         if !inputs.is_empty() {
-            if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
-                for &b in &inputs {
-                    // Primitive support for backspace \x7f or \x08
-                    if b == 0x7f || b == 0x08 {
-                        if !vt.input_buffer.is_empty() {
-                            vt.input_buffer.pop();
-                            // Echo backspace sequence
-                            let _ = self.muxer.output_to_devices(
-                                vt,
-                                "\x08 \x08",
-                                &mut self.input_devices,
-                                &mut self.output_devices,
-                            );
-                        }
-                        continue;
-                    }
+            let mut echo_buf = Vec::new();
+            let mut found_vt = false;
+            let mut active_vt_id = 0;
 
-                    vt.input_buffer.push(b);
+            if let Some(vt) = self.muxer.vts.iter_mut().find(|v| v.id == vt_id as usize) {
+                echo_buf = vt.process_input_bytes(&inputs);
+                found_vt = true;
+                active_vt_id = vt.id;
+            }
 
-                    // Echo back raw byte if it's printable ASCII or part of UTF-8 we'll handle
-                    // For now, simple ASCII echo.
-                    if b >= 32 && b < 127 {
-                        let _ = self.muxer.output_to_devices(
-                            vt,
-                            core::str::from_utf8(&[b]).unwrap_or(""),
-                            &mut self.input_devices,
-                            &mut self.output_devices,
-                        );
-                    } else if b == b'\r' {
-                        let _ = self.muxer.output_to_devices(
-                            vt,
-                            "\n",
-                            &mut self.input_devices,
-                            &mut self.output_devices,
-                        );
-                    }
-                }
-                self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
+            if found_vt && !echo_buf.is_empty() {
+                let _ = self.muxer.output_to_devices(
+                    active_vt_id,
+                    &echo_buf,
+                    &mut self.input_devices,
+                    &mut self.output_devices,
+                );
+            }
+
+            if found_vt {
+                let _ = self.muxer.render_vt(active_vt_id);
             }
         }
 
@@ -247,9 +257,9 @@ impl<'a> PrismServer<'a> {
     }
 
     fn route_input(&mut self, seat_id: usize, event: glenda::protocol::input::InputEvent) {
-        if let Some(seat) = self.seats.get_mut(seat_id) {
+        if let Some(seat) = self.muxer.seats.get_mut(seat_id) {
             if let Some(vt_id) = seat.active_vt {
-                if let Some(vt) = self.vts.iter_mut().find(|v| v.id == vt_id) {
+                if let Some(vt) = self.muxer.vts.iter_mut().find(|v| v.id == vt_id) {
                     // Routing logic:
                     // If it's character input (simplified mapping for now)
                     if event.kind == 1 {
@@ -329,15 +339,15 @@ impl<'a> PrismServer<'a> {
                         } else {
                             new_devices.push((name.clone(), LogicDeviceType::Uart));
 
-                            // Also register UART as output device for Seat 0
-                            if let Some(res) = self.input_devices.get(&name) {
-                                if let DeviceClientKind::Uart(_) = &res.kind {
-                                    if let Some(seat) = self.seats.get_mut(0) {
-                                        if !seat.output_devices.contains(&name) {
-                                            seat.output_devices.push(name.clone());
-                                        }
-                                    }
+                            // Explicitly bind UART as both input and output for the default seat (Seat 0)
+                            if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == 0) {
+                                if !seat.input_devices.contains(&name) {
+                                    seat.input_devices.push(name.clone());
                                 }
+                                if !seat.output_devices.contains(&name) {
+                                    seat.output_devices.push(name.clone());
+                                }
+                                log!("Bound UART {} to Seat 0 as Input/Output", name);
                             }
                         }
                     }
@@ -417,7 +427,7 @@ impl<'a> PrismServer<'a> {
 
         // Binding all new devices to Seat 0 (Physical Seat)
         for (name, dev_type) in new_devices {
-            if let Some(seat) = self.seats.get_mut(0) {
+            if let Some(seat) = self.muxer.seats.get_mut(0) {
                 match dev_type {
                     LogicDeviceType::Input | LogicDeviceType::Uart => {
                         if !seat.input_devices.contains(&name) {
@@ -430,26 +440,6 @@ impl<'a> PrismServer<'a> {
                         }
                     }
                     _ => {}
-                }
-            }
-        }
-
-        // Check if VT0 is ready to report running
-        if !self.vt0_ready {
-            let has_output = self.seats.get(0).map_or(false, |s| !s.output_devices.is_empty());
-            if has_output {
-                if let Some(vt) = self.vts.get_mut(0) {
-                    // Clear screen first time we get an output device
-                    self.muxer.clear_vt(vt, &mut self.input_devices, &mut self.output_devices);
-                    vt.write_str("Glenda OS - System Console Initialized.\n");
-                    self.muxer.render_vt(vt, &mut self.input_devices, &mut self.output_devices);
-
-                    // Report Running to init service
-                    let _ = self.init_client.report_service(
-                        Badge::null(),
-                        glenda::protocol::init::ServiceState::Running,
-                    );
-                    self.vt0_ready = true;
                 }
             }
         }
@@ -500,8 +490,8 @@ impl<'a> PrismServer<'a> {
         // after the call returns.
         client.connect(self.vspace, self.cspace)?;
 
-        // Queue initial read
-        let _ = client.read_async((shm_params.vaddr + 2048) as usize, 1, 2);
+        // Queue initial read (1024 bytes)
+        let _ = client.read_async((shm_params.vaddr + 2048) as usize, 1024, 2);
 
         let resource = DeviceResource {
             name: String::from(name),
