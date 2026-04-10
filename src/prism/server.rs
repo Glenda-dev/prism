@@ -74,6 +74,7 @@ impl SystemService for PrismServer<'_> {
                 Ok(()) => {}
                 Err(e) => {
                     if e == Error::Success {
+                        let _ = CSPACE_CAP.delete(self.reply.cap());
                         continue;
                     }
                     error!(
@@ -139,7 +140,7 @@ impl SystemService for PrismServer<'_> {
                     // Create an individual endpoint for this VT, badged with VT ID
                     let slot = s.cspace.alloc(s.res_client)?;
                     let badge = Badge::new(id);
-                    CSPACE_CAP.mint(s.endpoint.cap(), slot, badge, Rights::ALL)?;
+                    CSPACE_CAP.mint_self(s.endpoint.cap(), slot, badge, Rights::ALL)?;
 
                     log!("Created VT {} ({})", id, name);
                     u.set_mr(0, id);
