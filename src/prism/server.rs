@@ -30,10 +30,16 @@ impl SystemService for PrismServer<'_> {
             self.set_font(font_data).map_err(|_| Error::MappingFailed)?;
         }
 
+        // One-shot initial scan/setup for already existing devices.
+        self.sync_devices()?;
+
+        // Register hooks for future devices after initial one-shot scan.
         let hook_ep = self.ipc.endpoint.cap();
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Fb), hook_ep)?;
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Uart), hook_ep)?;
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Input), hook_ep)?;
+
+        self.init_client.report_service(Badge::null(), ServiceState::Running)?;
 
         Ok(())
     }
@@ -53,7 +59,6 @@ impl SystemService for PrismServer<'_> {
 
     fn run(&mut self) -> Result<(), Error> {
         self.ipc.running = true;
-        self.init_client.report_service(Badge::null(), ServiceState::Running)?;
         while self.ipc.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
