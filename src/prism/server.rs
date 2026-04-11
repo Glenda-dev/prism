@@ -30,7 +30,7 @@ impl SystemService for PrismServer<'_> {
             self.set_font(font_data).map_err(|_| Error::MappingFailed)?;
         }
 
-        let hook_ep = self.endpoint.cap();
+        let hook_ep = self.ipc.endpoint.cap();
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Fb), hook_ep)?;
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Uart), hook_ep)?;
         self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Input), hook_ep)?;
@@ -39,9 +39,9 @@ impl SystemService for PrismServer<'_> {
     }
 
     fn listen(&mut self, ep: Endpoint, reply: CapPtr, recv: CapPtr) -> Result<(), Error> {
-        self.endpoint = ep;
-        self.reply = Reply::from(reply);
-        self.recv = recv;
+        self.ipc.endpoint = ep;
+        self.ipc.reply = Reply::from(reply);
+        self.ipc.recv = recv;
         self.res_client.register_cap(
             Badge::null(),
             ResourceType::Endpoint,
@@ -52,14 +52,14 @@ impl SystemService for PrismServer<'_> {
     }
 
     fn run(&mut self) -> Result<(), Error> {
-        self.running = true;
+        self.ipc.running = true;
         self.init_client.report_service(Badge::null(), ServiceState::Running)?;
-        while self.running {
+        while self.ipc.running {
             let mut utcb = unsafe { UTCB::new() };
             utcb.clear();
-            utcb.set_reply_window(self.reply.cap());
-            utcb.set_recv_window(self.recv);
-            match self.endpoint.recv(&mut utcb) {
+            utcb.set_reply_window(self.ipc.reply.cap());
+            utcb.set_recv_window(self.ipc.recv);
+            match self.ipc.endpoint.recv(&mut utcb) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Recv error: {:?}", e);
@@ -74,7 +74,7 @@ impl SystemService for PrismServer<'_> {
                 Ok(()) => {}
                 Err(e) => {
                     if e == Error::Success {
-                        let _ = CSPACE_CAP.delete(self.reply.cap());
+                        let _ = CSPACE_CAP.delete(self.ipc.reply.cap());
                         continue;
                     }
                     error!(
@@ -140,7 +140,7 @@ impl SystemService for PrismServer<'_> {
                     // Create an individual endpoint for this VT, badged with VT ID
                     let slot = s.cspace.alloc(s.res_client)?;
                     let badge = Badge::new(id);
-                    CSPACE_CAP.mint_self(s.endpoint.cap(), slot, badge, Rights::ALL)?;
+                    CSPACE_CAP.mint_self(s.ipc.endpoint.cap(), slot, badge, Rights::ALL)?;
 
                     log!("Created VT {} ({})", id, name);
                     u.set_mr(0, id);
@@ -179,11 +179,11 @@ impl SystemService for PrismServer<'_> {
     }
 
     fn reply(&mut self, utcb: &mut UTCB) -> Result<(), Error> {
-        self.reply.reply(utcb)
+        self.ipc.reply.reply(utcb)
     }
 
     fn stop(&mut self) {
-        self.running = false;
+        self.ipc.running = false;
         let _ = self.init_client.report_service(Badge::null(), ServiceState::Stopped);
     }
 }

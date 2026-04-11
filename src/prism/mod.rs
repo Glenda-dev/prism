@@ -28,10 +28,16 @@ use glenda::ipc::{Badge, UTCB};
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
 use glenda::utils::manager::{CSpaceManager, VSpaceManager};
 
-pub struct PrismServer<'a> {
-    pub running: bool,
-    pub seats: Vec<Seat<'a>>,
+pub struct PrismIpc {
+    pub endpoint: Endpoint,
+    pub reply: Reply,
     pub recv: CapPtr,
+    pub running: bool,
+}
+
+pub struct PrismServer<'a> {
+    pub ipc: PrismIpc,
+    pub seats: Vec<Seat<'a>>,
     pub vts: Vec<VirtualTerminal>,
     pub muxer: Muxer<'a>,
     pub dev_client: &'a mut DeviceClient,
@@ -43,9 +49,6 @@ pub struct PrismServer<'a> {
 
     pub res_client: &'a mut ResourceClient,
     pub mem_pool: MemoryPool,
-    pub endpoint: Endpoint,
-    pub reply: Reply,
-
     pub seat_map: BTreeMap<Badge, u32>, // Badge -> Seat ID
     pub pending_input: BTreeMap<String, Vec<u8>>, // Device Name -> Input Buffer
     pub cspace: &'a mut CSpaceManager,
@@ -64,7 +67,12 @@ impl<'a> PrismServer<'a> {
         kernel_cap: Kernel,
     ) -> Self {
         let mut server = Self {
-            running: false,
+            ipc: PrismIpc {
+                endpoint: Endpoint::from(CapPtr::null()),
+                recv: CapPtr::null(),
+                reply: Reply::from(CapPtr::null()),
+                running: false,
+            },
             seats: Vec::new(),
             vts: Vec::new(),
             muxer: Muxer::new(),
@@ -73,9 +81,6 @@ impl<'a> PrismServer<'a> {
             output_devices: BTreeMap::new(),
             res_client,
             mem_pool: MemoryPool::new(),
-            endpoint: Endpoint::from(CapPtr::null()),
-            recv: CapPtr::null(),
-            reply: Reply::from(CapPtr::null()),
             seat_map: BTreeMap::new(),
             pending_input: BTreeMap::new(),
             cspace,
@@ -383,7 +388,7 @@ impl<'a> PrismServer<'a> {
                         slot,
                     ) {
                         // Setup Input device via io_uring
-                        let notify_ep = self.endpoint;
+                        let notify_ep = self.ipc.endpoint;
                         let ring_recv_slot = self.cspace.alloc(self.res_client)?;
                         let data_recv_slot = self.cspace.alloc(self.res_client)?;
 
@@ -458,7 +463,7 @@ impl<'a> PrismServer<'a> {
     }
 
     fn setup_uart(&mut self, name: &str, ep: Endpoint) -> Result<(), Error> {
-        let notify_ep = self.endpoint;
+        let notify_ep = self.ipc.endpoint;
 
         // Allocate persistent slot for resource transfer from CSpace
         let ring_recv_slot = self.cspace.alloc(self.res_client)?;
