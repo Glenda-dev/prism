@@ -67,7 +67,7 @@ fn main() -> usize {
     );
 
     // 7. Run Server Loop
-    server.listen(ENDPOINT_CAP, RECV_SLOT, REPLY_SLOT).expect("Failed to listen");
+    server.listen(ENDPOINT_CAP, REPLY_SLOT, RECV_SLOT).expect("Failed to listen");
 
     // 4. Initialize Prism Server with font and config
     server.init().expect("Failed to initialize Prism Server");

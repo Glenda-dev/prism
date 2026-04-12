@@ -140,6 +140,41 @@ impl VirtualTerminal {
         if !self.input_buffer.is_empty() { Some(self.input_buffer.remove(0)) } else { None }
     }
 
+    pub fn set_mode(&mut self, mode: TerminalDisplayMode) {
+        self.mode = mode;
+    }
+
+    pub fn set_winsize(&mut self, size: WindowSize) {
+        let rows = core::cmp::max(size.rows, 1);
+        let cols = core::cmp::max(size.cols, 1);
+
+        if rows == self.winsize.rows && cols == self.winsize.cols {
+            self.winsize = size;
+            return;
+        }
+
+        let old_rows = self.winsize.rows as usize;
+        let old_cols = self.winsize.cols as usize;
+        let new_rows = rows as usize;
+        let new_cols = cols as usize;
+
+        let mut new_grid = vec![b' ' as u32; new_rows * new_cols];
+
+        let copy_rows = core::cmp::min(old_rows, new_rows);
+        let copy_cols = core::cmp::min(old_cols, new_cols);
+        for r in 0..copy_rows {
+            let old_base = r * old_cols;
+            let new_base = r * new_cols;
+            new_grid[new_base..new_base + copy_cols]
+                .copy_from_slice(&self.grid[old_base..old_base + copy_cols]);
+        }
+
+        self.grid = new_grid;
+        self.winsize = WindowSize { rows, cols, xpixel: size.xpixel, ypixel: size.ypixel };
+        self.cursor.0 = core::cmp::min(self.cursor.0, cols.saturating_sub(1));
+        self.cursor.1 = core::cmp::min(self.cursor.1, rows.saturating_sub(1));
+    }
+
     pub fn to_desc(&self) -> VTDesc {
         VTDesc {
             id: self.id,
