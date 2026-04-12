@@ -20,6 +20,8 @@ pub struct VirtualTerminal {
     pub grid: Vec<u32>, // Grid of Unicode chars (32-bit codepoints)
     pub seat_ids: Vec<usize>,
     pub input_buffer: Vec<u8>,
+    pub termios: [u8; 44],
+    pub pgrp: i32,
     #[cfg(feature = "utf8")]
     pub decoder: Utf8Decoder,
     pub paddr: usize,
@@ -39,6 +41,8 @@ impl VirtualTerminal {
             grid: vec![b' ' as u32; (cols * rows) as usize],
             seat_ids: Vec::new(),
             input_buffer: Vec::new(),
+            termios: [0; 44],
+            pgrp: 0,
             #[cfg(feature = "utf8")]
             decoder: Utf8Decoder::new(),
             paddr: 0,
@@ -235,6 +239,29 @@ impl VirtualTerminalService for PrismServer<'_> {
         } else {
             Err(Error::NotFound)
         }
+    }
+
+    fn open_vt(&mut self, _badge: Badge, vt_id: usize, _recv: CapPtr) -> Result<Endpoint, Error> {
+        if self.muxer.vts.iter().any(|v| v.id == vt_id) {
+            Ok(self.ipc.endpoint)
+        } else {
+            Err(Error::NotFound)
+        }
+    }
+
+    fn get_pty_lock(&mut self, _badge: Badge, vt_id: usize) -> Result<bool, Error> {
+        if !self.muxer.vts.iter().any(|v| v.id == vt_id) {
+            return Err(Error::NotFound);
+        }
+        Ok(*self.pty_locks.get(&vt_id).unwrap_or(&true))
+    }
+
+    fn set_pty_lock(&mut self, _badge: Badge, vt_id: usize, locked: bool) -> Result<(), Error> {
+        if !self.muxer.vts.iter().any(|v| v.id == vt_id) {
+            return Err(Error::NotFound);
+        }
+        self.pty_locks.insert(vt_id, locked);
+        Ok(())
     }
 
     fn assign_device_to_seat(

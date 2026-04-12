@@ -47,6 +47,7 @@ pub struct PrismServer<'a> {
     pub mem_pool: MemoryPool,
     pub seat_map: BTreeMap<Badge, u32>, // Badge -> Seat ID
     pub pending_input: BTreeMap<String, Vec<u8>>, // Device Name -> Input Buffer
+    pub pty_locks: BTreeMap<usize, bool>,         // vt_id -> locked
     pub cspace: &'a mut CSpaceManager,
     pub vspace: &'a mut VSpaceManager,
     pub init_client: &'a mut InitClient,
@@ -79,6 +80,7 @@ impl<'a> PrismServer<'a> {
             mem_pool: MemoryPool::new(),
             seat_map: BTreeMap::new(),
             pending_input: BTreeMap::new(),
+            pty_locks: BTreeMap::new(),
             cspace,
             vspace,
             init_client,

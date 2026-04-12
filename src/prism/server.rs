@@ -189,6 +189,29 @@ impl SystemService for PrismServer<'_> {
                     Ok(0usize)
                 })
             },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_TERMIOS) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| {
+                    s.handle_terminal_get_termios(u.get_badge(), u)?;
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_TERMIOS) => |s: &mut Self, u: &mut UTCB| {
+                let len = u.get_mr(0);
+                handle_call(u, |u| {
+                    s.handle_terminal_set_termios(u.get_badge(), len, u)?;
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_PGRP) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_terminal_get_pgrp(u.get_badge()))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_PGRP) => |s: &mut Self, u: &mut UTCB| {
+                let pgrp = u.get_mr(0) as i32;
+                handle_call(u, |u| {
+                    s.handle_terminal_set_pgrp(u.get_badge(), pgrp)?;
+                    Ok(0usize)
+                })
+            },
 
             // Terminal Service (Per-VT)
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_BAUD) => |_s: &mut Self, u: &mut UTCB| {
@@ -207,22 +230,13 @@ impl SystemService for PrismServer<'_> {
                     Ok(0usize)
                 })
             },
-            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_IOCTL) => |_s: &mut Self, u: &mut UTCB| {
-                let req = u.get_mr(0);
-                let arg = u.get_mr(1);
-                let badge = u.get_badge();
-                handle_call(u, |_| {
-                    log!("Generic IOCTL req={:#x} arg={:#x} for VT {}", req, arg, badge.bits());
-                    Ok(0usize)
-                })
-            },
-
             // Terminal VTS protocol
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_ALLOC_VT) => |s: &mut Self, u: &mut UTCB| {
                 let name = unsafe { u.read_str()? };
                 handle_cap_call(u, |u| {
                     let vt = VirtualTerminal::new(0, &name);
                     let id = s.muxer.add_vt(vt);
+                    s.pty_locks.insert(id, true);
 
                     // Create an individual endpoint for this VT, badged with VT ID
                     let slot = s.cspace.alloc(s.res_client)?;
@@ -252,6 +266,38 @@ impl SystemService for PrismServer<'_> {
                             seat.active_vt = None;
                         }
                     }
+                    s.pty_locks.remove(&vt_id);
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::VTS_OPEN_VT) => |s: &mut Self, u: &mut UTCB| {
+                let vt_id = u.get_mr(0);
+                handle_cap_call(u, |_u| {
+                    if !s.muxer.vts.iter().any(|v| v.id == vt_id) {
+                        return Err(Error::NotFound);
+                    }
+                    let slot = s.cspace.alloc(s.res_client)?;
+                    CSPACE_CAP.mint_self(s.ipc.endpoint.cap(), slot, Badge::new(vt_id), Rights::ALL)?;
+                    Ok(slot)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::VTS_GET_PTY_LOCK) => |s: &mut Self, u: &mut UTCB| {
+                let vt_id = u.get_mr(0);
+                handle_call(u, |_u| {
+                    if !s.muxer.vts.iter().any(|v| v.id == vt_id) {
+                        return Err(Error::NotFound);
+                    }
+                    Ok(usize::from(*s.pty_locks.get(&vt_id).unwrap_or(&true)))
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::VTS_SET_PTY_LOCK) => |s: &mut Self, u: &mut UTCB| {
+                let vt_id = u.get_mr(0);
+                let locked = u.get_mr(1) != 0;
+                handle_call(u, |_u| {
+                    if !s.muxer.vts.iter().any(|v| v.id == vt_id) {
+                        return Err(Error::NotFound);
+                    }
+                    s.pty_locks.insert(vt_id, locked);
                     Ok(0usize)
                 })
             },
