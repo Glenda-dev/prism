@@ -29,6 +29,9 @@ pub struct VirtualTerminal {
 }
 
 impl VirtualTerminal {
+    const TERMIOS_LFLAG_OFFSET: usize = 12;
+    const TERMIOS_ECHO: u32 = 0x0000_0008;
+
     pub fn new(id: usize, name: &str) -> Self {
         let cols = 80;
         let rows = 25;
@@ -57,12 +60,15 @@ impl VirtualTerminal {
 
     pub fn process_input_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut echo_buf = Vec::new();
+        let do_echo = self.local_echo_enabled();
         for &b in bytes {
             if b == 0x7f || b == 0x08 {
                 if !self.input_buffer.is_empty() {
                     self.input_buffer.pop();
-                    self.write_str("\x08 \x08");
-                    echo_buf.extend_from_slice(b"\x08 \x08");
+                    if do_echo {
+                        self.write_str("\x08 \x08");
+                        echo_buf.extend_from_slice(b"\x08 \x08");
+                    }
                 }
             } else if b == 0x1b {
                 // Escape character (ESC)
@@ -71,8 +77,10 @@ impl VirtualTerminal {
                 // echo_buf.extend_from_slice(b"^[");
             } else if b == b'\r' {
                 self.input_buffer.push(b'\n');
-                self.write_str("\n");
-                echo_buf.extend_from_slice(b"\r\n");
+                if do_echo {
+                    self.write_str("\n");
+                    echo_buf.extend_from_slice(b"\r\n");
+                }
             } else {
                 #[cfg(feature = "utf8")]
                 {
@@ -81,14 +89,16 @@ impl VirtualTerminal {
                         for &ub in decoded.as_bytes() {
                             self.input_buffer.push(ub);
                         }
-                        self.write_str(&decoded);
-                        echo_buf.extend_from_slice(decoded.as_bytes());
+                        if do_echo {
+                            self.write_str(&decoded);
+                            echo_buf.extend_from_slice(decoded.as_bytes());
+                        }
                     }
                 }
                 #[cfg(not(feature = "utf8"))]
                 {
                     self.input_buffer.push(b);
-                    if b >= 32 && b < 127 {
+                    if do_echo && b >= 32 && b < 127 {
                         self.write_str(core::str::from_utf8(&[b]).unwrap());
                         echo_buf.push(b);
                     }
@@ -96,6 +106,17 @@ impl VirtualTerminal {
             }
         }
         echo_buf
+    }
+
+    fn local_echo_enabled(&self) -> bool {
+        let off = Self::TERMIOS_LFLAG_OFFSET;
+        if self.termios.len() < off + 4 {
+            return true;
+        }
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(&self.termios[off..off + 4]);
+        let lflag = u32::from_ne_bytes(raw);
+        (lflag & Self::TERMIOS_ECHO) != 0
     }
 
     pub fn write_str(&mut self, s: &str) {

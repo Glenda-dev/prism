@@ -114,6 +114,9 @@ impl SystemService for PrismServer<'_> {
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_CHAR) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u| s.handle_console_get_char(u.get_badge()))
             },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_POLL_READ) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_console_poll_read(u.get_badge()))
+            },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_PUT_CHAR) => |s: &mut Self, u: &mut UTCB| {
                 let ch = u.get_mr(0) as u8;
                 handle_call(u, |u| {

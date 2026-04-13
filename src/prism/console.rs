@@ -38,6 +38,21 @@ impl PrismServer<'_> {
         Ok(vt.read_char().unwrap_or(0) as usize)
     }
 
+    pub fn handle_console_poll_read(&mut self, badge: Badge) -> Result<usize, Error> {
+        let vt_id = self.active_vt_for_badge(badge)?;
+        if let Err(e) = self.poll_input_rings() {
+            warn!("poll_input_rings during TERM_POLL_READ failed: {:?}", e);
+        }
+        let has_input = self
+            .muxer
+            .vts
+            .iter()
+            .find(|v| v.id == vt_id)
+            .map(|v| !v.input_buffer.is_empty())
+            .ok_or(Error::NotFound)?;
+        Ok(usize::from(has_input))
+    }
+
     pub fn handle_console_get_str(
         &mut self,
         badge: Badge,
@@ -47,18 +62,33 @@ impl PrismServer<'_> {
         let vt_id = self.active_vt_for_badge(badge)?;
         let max_len = core::cmp::min(len, utcb.buffer_mut().len());
 
-        let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
-        let mut read_len = 0usize;
-        while read_len < max_len {
-            if let Some(c) = vt.read_char() {
-                utcb.buffer_mut()[read_len] = c;
-                read_len += 1;
-            } else {
-                break;
-            }
+        if max_len == 0 {
+            utcb.set_size(0);
+            return Ok(0);
         }
-        utcb.set_size(read_len);
-        Ok(read_len)
+
+        loop {
+            let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
+            let mut read_len = 0usize;
+            while read_len < max_len {
+                if let Some(c) = vt.read_char() {
+                    utcb.buffer_mut()[read_len] = c;
+                    read_len += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if read_len > 0 {
+                utcb.set_size(read_len);
+                return Ok(read_len);
+            }
+
+            if let Err(e) = self.poll_input_rings() {
+                warn!("poll_input_rings during TERM_GET_STR failed: {:?}", e);
+            }
+            core::hint::spin_loop();
+        }
     }
 
     pub fn handle_terminal_set_mode(&mut self, badge: Badge, mode: usize) -> Result<(), Error> {
