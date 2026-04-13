@@ -291,12 +291,7 @@ impl VirtualTerminalService for PrismServer<'_> {
         seat_id: usize,
         device_name: &str,
     ) -> Result<(), Error> {
-        if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == seat_id) {
-            seat.input_devices.push(alloc::string::String::from(device_name));
-            Ok(())
-        } else {
-            Err(Error::NotFound)
-        }
+        self.bind_device_to_seat(seat_id, device_name)
     }
 
     fn revoke_device_from_seat(
@@ -305,11 +300,6 @@ impl VirtualTerminalService for PrismServer<'_> {
         seat_id: usize,
         device_name: &str,
     ) -> Result<(), Error> {
-        if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == seat_id) {
-            seat.input_devices.retain(|d| d != device_name);
-            Ok(())
-        } else {
-            Err(Error::NotFound)
-        }
+        self.unbind_device_from_seat(seat_id, device_name)
     }
 }

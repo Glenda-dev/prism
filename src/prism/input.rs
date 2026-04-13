@@ -163,22 +163,22 @@ impl PrismServer<'_> {
     }
 
     fn process_uart_ring(&mut self, name: &str) -> Result<Option<usize>, Error> {
-        let mut seat_id = None;
-        for seat in self.muxer.seats.iter() {
-            if seat.input_devices.contains(&String::from(name)) {
-                seat_id = Some(seat.id);
-                break;
-            }
-        }
-
-        let sid = seat_id.ok_or(Error::NotFound)?;
-        let vt_id = self
+        let Some(sid) = self
             .muxer
             .seats
             .iter()
-            .find(|s| s.id == sid)
-            .and_then(|s| s.active_vt)
-            .ok_or(Error::NotFound)?;
+            .find(|seat| seat.input_devices.contains(&String::from(name)))
+            .map(|seat| seat.id)
+        else {
+            // Device has pending input but is not bound to any seat.
+            return Ok(None);
+        };
+
+        let Some(vt_id) = self.muxer.seats.iter().find(|s| s.id == sid).and_then(|s| s.active_vt)
+        else {
+            // Seat exists but currently has no active VT.
+            return Ok(None);
+        };
 
         let mut inputs = Vec::new();
         if let Some(device) = self.input_devices.get_mut(name) {
@@ -203,22 +203,22 @@ impl PrismServer<'_> {
     }
 
     fn process_input_ring(&mut self, name: &str) -> Result<Option<usize>, Error> {
-        let mut seat_id = None;
-        for seat in self.muxer.seats.iter() {
-            if seat.input_devices.contains(&String::from(name)) {
-                seat_id = Some(seat.id);
-                break;
-            }
-        }
-
-        let sid = seat_id.ok_or(Error::NotFound)?;
-        let vt_id = self
+        let Some(sid) = self
             .muxer
             .seats
             .iter()
-            .find(|s| s.id == sid)
-            .and_then(|s| s.active_vt)
-            .ok_or(Error::NotFound)?;
+            .find(|seat| seat.input_devices.contains(&String::from(name)))
+            .map(|seat| seat.id)
+        else {
+            // Device has pending input but is not bound to any seat.
+            return Ok(None);
+        };
+
+        let Some(vt_id) = self.muxer.seats.iter().find(|s| s.id == sid).and_then(|s| s.active_vt)
+        else {
+            // Seat exists but currently has no active VT.
+            return Ok(None);
+        };
 
         let mut inputs = Vec::new();
         if let Some(device) = self.input_devices.get_mut(name)

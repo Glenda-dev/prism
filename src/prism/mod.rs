@@ -87,15 +87,10 @@ impl<'a> PrismServer<'a> {
             kernel_cap,
         };
 
-        // Create Default Seat and VT (System Console)
-        let vt = VirtualTerminal::new(0, "System Console");
-        let vt_id = server.muxer.add_vt(vt);
-
+        // Create Default Seat only; VT is created by userspace manager (APE) on demand.
         let mut seat = Seat::new(0, "System Seat");
-        seat.active_vt = Some(vt_id);
-        // Ensure Seat 0 has System Console mapped for both input and output
+        seat.active_vt = None;
         server.muxer.add_seat(seat);
-        server.muxer.bind_vt_to_seat(vt_id, 0);
 
         server
     }

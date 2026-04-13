@@ -4,13 +4,10 @@ use crate::prism::vt::VirtualTerminal;
 use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Reply, Rights};
 use glenda::error::Error;
 use glenda::interface::CSpaceService;
-use glenda::interface::{
-    DeviceService, InitService, ResourceService, SystemService, VSpaceService,
-};
+use glenda::interface::{InitService, ResourceService, SystemService, VSpaceService};
 use glenda::ipc::server::{handle_call, handle_cap_call, handle_notify};
 use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::protocol;
-use glenda::protocol::device::{HookTarget, LogicDeviceType};
 use glenda::protocol::init::ServiceState;
 use glenda::protocol::resource::{ResourceType, VT_ENDPOINT};
 use glenda::protocol::terminal::{TerminalDisplayMode, TerminalUringConfig};
@@ -35,12 +32,6 @@ impl SystemService for PrismServer<'_> {
 
         // One-shot initial scan/setup for already existing devices.
         self.sync_devices()?;
-
-        // Register hooks for future devices after initial one-shot scan.
-        let hook_ep = self.ipc.endpoint.cap();
-        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Fb), hook_ep)?;
-        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Uart), hook_ep)?;
-        self.dev_client.hook(Badge::null(), HookTarget::Type(LogicDeviceType::Input), hook_ep)?;
 
         self.init_client.report_service(Badge::null(), ServiceState::Running)?;
 
@@ -332,6 +323,22 @@ impl SystemService for PrismServer<'_> {
                     Ok(0usize)
                 })
             },
+            (protocol::TERMINAL_PROTO, protocol::terminal::SEAT_BIND_DEVICE) => |s: &mut Self, u: &mut UTCB| {
+                let seat_id = u.get_mr(0);
+                let dev_name = unsafe { u.read_str()? };
+                handle_call(u, |_u| {
+                    s.bind_device_to_seat(seat_id, &dev_name)?;
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::SEAT_UNBIND_DEVICE) => |s: &mut Self, u: &mut UTCB| {
+                let seat_id = u.get_mr(0);
+                let dev_name = unsafe { u.read_str()? };
+                handle_call(u, |_u| {
+                    s.unbind_device_from_seat(seat_id, &dev_name)?;
+                    Ok(0usize)
+                })
+            },
             (protocol::TERMINAL_PROTO, protocol::terminal::VTS_SET_EXCLUSIVE) => |s: &mut Self, u: &mut UTCB| {
                 let seat_id = u.get_mr(0);
                 let exclusive = u.get_mr(1) != 0;
@@ -339,13 +346,7 @@ impl SystemService for PrismServer<'_> {
             },
 
             (protocol::KERNEL_PROTO, protocol::kernel::NOTIFY) => |s: &mut Self, u: &mut UTCB| {
-                let badge_bits = u.get_badge().bits();
                 handle_notify(u, |_u| {
-                    if badge_bits & glenda::protocol::device::NOTIFY_HOOK != 0 {
-                        if let Err(e) = s.sync_devices() {
-                            log!("Failed to sync and attach devices: {:?}", e);
-                        }
-                    }
                     // For UART/InputClient, any notification might mean new data
                     if let Err(e) = s.poll_input_rings() {
                         log!("Failed to poll input rings: {:?}", e);

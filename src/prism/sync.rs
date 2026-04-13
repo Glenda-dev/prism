@@ -16,9 +16,42 @@ use glenda::ipc::Badge;
 use glenda::protocol::device::{DeviceQuery, LogicDeviceType};
 
 impl PrismServer<'_> {
-    pub fn sync_devices(&mut self) -> Result<(), Error> {
-        let mut new_devices = Vec::new();
+    fn classify_bind_direction(
+        &self,
+        device_name: &str,
+        bind_input: &mut bool,
+        bind_output: &mut bool,
+    ) {
+        if let Some(dev) = self.input_devices.get(device_name) {
+            *bind_input |= dev.is_input();
+            *bind_output |= dev.is_output();
+        }
+        if let Some(dev) = self.output_devices.get(device_name) {
+            *bind_input |= dev.is_input();
+            *bind_output |= dev.is_output();
+        }
 
+        if *bind_input || *bind_output {
+            return;
+        }
+
+        // Pre-binding fallback by logical device naming convention.
+        if device_name.starts_with("uart") {
+            *bind_input = true;
+            *bind_output = true;
+            return;
+        }
+        if device_name.starts_with("input") {
+            *bind_input = true;
+            return;
+        }
+        if device_name.starts_with("fb") {
+            *bind_output = true;
+            return;
+        }
+    }
+
+    pub fn sync_devices(&mut self) -> Result<(), Error> {
         log!("Syncing devices...");
 
         let query_fb =
@@ -85,7 +118,6 @@ impl PrismServer<'_> {
                             endpoint: ep,
                         };
                         self.output_devices.insert(name.clone(), resources);
-                        new_devices.push((name, LogicDeviceType::Fb));
                     }
                 }
             }
@@ -110,18 +142,6 @@ impl PrismServer<'_> {
                         log!("Connecting to UART {}...", name);
                         if let Err(e) = self.setup_uart(&name, ep) {
                             log!("Failed to setup UART async: {:?}", e);
-                        } else {
-                            new_devices.push((name.clone(), LogicDeviceType::Uart));
-
-                            if let Some(seat) = self.muxer.seats.iter_mut().find(|s| s.id == 0) {
-                                if !seat.input_devices.contains(&name) {
-                                    seat.input_devices.push(name.clone());
-                                }
-                                if !seat.output_devices.contains(&name) {
-                                    seat.output_devices.push(name.clone());
-                                }
-                                log!("Bound UART {} to Seat 0 as Input/Output", name);
-                            }
                         }
                     }
                 }
@@ -190,30 +210,52 @@ impl PrismServer<'_> {
                             endpoint: ep,
                         };
                         self.input_devices.insert(name.clone(), resources);
-                        new_devices.push((name, LogicDeviceType::Input));
                     }
                 }
             }
         }
 
-        for (name, dev_type) in new_devices {
-            if let Some(seat) = self.muxer.seats.get_mut(0) {
-                match dev_type {
-                    LogicDeviceType::Input | LogicDeviceType::Uart => {
-                        if !seat.input_devices.contains(&name) {
-                            seat.input_devices.push(name.clone());
-                        }
-                    }
-                    LogicDeviceType::Fb => {
-                        if !seat.output_devices.contains(&name) {
-                            seat.output_devices.push(name.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        Ok(())
+    }
+
+    pub fn bind_device_to_seat(&mut self, seat_id: usize, device_name: &str) -> Result<(), Error> {
+        let mut bind_input = false;
+        let mut bind_output = false;
+
+        self.classify_bind_direction(device_name, &mut bind_input, &mut bind_output);
+
+        if !bind_input && !bind_output {
+            // Keep pre-binding compatibility for unknown names.
+            bind_input = true;
+            bind_output = true;
+            log!(
+                "Seat {} pre-binding unknown device '{}' as input+output (will activate once device appears)",
+                seat_id,
+                device_name
+            );
         }
 
+        let seat = self.muxer.seats.iter_mut().find(|s| s.id == seat_id).ok_or(Error::NotFound)?;
+
+        let dev_name = String::from(device_name);
+        if bind_input && !seat.input_devices.contains(&dev_name) {
+            seat.input_devices.push(dev_name.clone());
+        }
+        if bind_output && !seat.output_devices.contains(&dev_name) {
+            seat.output_devices.push(dev_name);
+        }
+
+        Ok(())
+    }
+
+    pub fn unbind_device_from_seat(
+        &mut self,
+        seat_id: usize,
+        device_name: &str,
+    ) -> Result<(), Error> {
+        let seat = self.muxer.seats.iter_mut().find(|s| s.id == seat_id).ok_or(Error::NotFound)?;
+        seat.input_devices.retain(|d| d != device_name);
+        seat.output_devices.retain(|d| d != device_name);
         Ok(())
     }
 
