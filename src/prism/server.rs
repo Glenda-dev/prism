@@ -30,8 +30,7 @@ impl SystemService for PrismServer<'_> {
             self.set_font(font_data).map_err(|_| Error::MappingFailed)?;
         }
 
-        // One-shot initial scan/setup for already existing devices.
-        self.sync_devices()?;
+        // Device attachment is now explicit: APE will set seat/vt and bind devices on demand.
 
         self.init_client.report_service(Badge::null(), ServiceState::Running)?;
 

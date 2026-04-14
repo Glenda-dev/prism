@@ -21,7 +21,11 @@ pub struct DeviceResource {
     pub name: String,
     pub kind: DeviceClientKind,
     pub ring_frame: Frame,
+    pub ring_vaddr: usize,
+    pub ring_pages: usize,
     pub data_frame: Frame,
+    pub data_vaddr: usize,
+    pub data_pages: usize,
     pub endpoint: Endpoint,
 }
 
@@ -47,10 +51,7 @@ impl DeviceResource {
                 let pushed = client.push_tx_ring(bytes);
 
                 if pushed < bytes.len() {
-                    warn!(
-                        "Prism: TX ring full, {} bytes dropped",
-                        bytes.len() - pushed
-                    );
+                    warn!("Prism: TX ring full, {} bytes dropped", bytes.len() - pushed);
                     // 在純環化設計中，如果環滿了應該返回 WouldBlock 或者在 client 层等待
                     // 暫時返回 Ok 但記錄警告，或者返回 Error
                     return Err(Error::WouldBlock);
