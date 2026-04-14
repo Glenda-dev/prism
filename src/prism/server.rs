@@ -10,7 +10,7 @@ use glenda::ipc::{Badge, MsgFlags, MsgTag, UTCB};
 use glenda::protocol;
 use glenda::protocol::init::ServiceState;
 use glenda::protocol::resource::{ResourceType, VT_ENDPOINT};
-use glenda::protocol::terminal::{TerminalDisplayMode, TerminalUringConfig};
+use glenda::protocol::terminal::{TerminalDisplayMode, TerminalSessionMode, TerminalUringConfig};
 use psf2_font::TERMINUS_FONT_DATA;
 
 impl SystemService for PrismServer<'_> {
@@ -108,6 +108,39 @@ impl SystemService for PrismServer<'_> {
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_POLL_READ) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u| s.handle_console_poll_read(u.get_badge()))
             },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_STREAM_READ) => |s: &mut Self, u: &mut UTCB| {
+                let len = u.get_mr(0);
+                handle_call(u, |u| s.handle_console_get_str(u.get_badge(), len, u))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_STREAM_WRITE) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_console_put_str(u))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_STREAM_POLL) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_console_poll_read(u.get_badge()))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_STREAM_SET_MODE) => |s: &mut Self, u: &mut UTCB| {
+                if u.get_mr(0) > 1 {
+                    return handle_call(u, |_u| Err::<usize, Error>(Error::InvalidArgs));
+                }
+                let mode = match u.get_mr(0) {
+                    0 => TerminalSessionMode::ByteStream,
+                    1 => TerminalSessionMode::Native,
+                    _ => unreachable!(),
+                };
+                handle_call(u, |u| {
+                    s.handle_terminal_set_session_mode(u.get_badge(), mode)?;
+                    Ok(0usize)
+                })
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_NATIVE_PUT_TEXT) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_native_put_text(u))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_NATIVE_POLL_EVENT) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_native_poll_event(u.get_badge()))
+            },
+            (protocol::TERMINAL_PROTO, protocol::terminal::TERM_NATIVE_GET_EVENT) => |s: &mut Self, u: &mut UTCB| {
+                handle_call(u, |u| s.handle_native_get_event(u.get_badge(), u))
+            },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_PUT_CHAR) => |s: &mut Self, u: &mut UTCB| {
                 let ch = u.get_mr(0) as u8;
                 handle_call(u, |u| {
@@ -185,24 +218,24 @@ impl SystemService for PrismServer<'_> {
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_TERMIOS) => |s: &mut Self, u: &mut UTCB| {
                 handle_call(u, |u| {
-                    s.handle_terminal_get_termios(u.get_badge(), u)?;
+                    s.handle_legacy_get_termios(u.get_badge(), u)?;
                     Ok(0usize)
                 })
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_TERMIOS) => |s: &mut Self, u: &mut UTCB| {
                 let len = u.get_mr(0);
                 handle_call(u, |u| {
-                    s.handle_terminal_set_termios(u.get_badge(), len, u)?;
+                    s.handle_legacy_set_termios(u.get_badge(), len, u)?;
                     Ok(0usize)
                 })
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_PGRP) => |s: &mut Self, u: &mut UTCB| {
-                handle_call(u, |u| s.handle_terminal_get_pgrp(u.get_badge()))
+                handle_call(u, |u| s.handle_legacy_get_pgrp(u.get_badge()))
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_SET_PGRP) => |s: &mut Self, u: &mut UTCB| {
                 let pgrp = u.get_mr(0) as i32;
                 handle_call(u, |u| {
-                    s.handle_terminal_set_pgrp(u.get_badge(), pgrp)?;
+                    s.handle_legacy_set_pgrp(u.get_badge(), pgrp)?;
                     Ok(0usize)
                 })
             },

@@ -8,20 +8,22 @@ use glenda::cap::{CapPtr, Endpoint};
 use glenda::error::Error;
 use glenda::interface::VirtualTerminalService;
 use glenda::ipc::Badge;
-use glenda::protocol::terminal::{TerminalDisplayMode, VTDesc, WindowSize};
+use glenda::protocol::terminal::{
+    TerminalDisplayMode, TerminalInputEvent, TerminalSessionMode, VTDesc, WindowSize,
+};
 
 /// Logic for a Virtual Terminal (VT).
 pub struct VirtualTerminal {
     pub id: usize,
     pub name: String,
+    pub session_mode: TerminalSessionMode,
     pub mode: TerminalDisplayMode,
     pub winsize: WindowSize,
     pub cursor: (u16, u16),
     pub grid: Vec<u32>, // Grid of Unicode chars (32-bit codepoints)
     pub seat_ids: Vec<usize>,
     pub input_buffer: Vec<u8>,
-    pub termios: [u8; 44],
-    pub pgrp: i32,
+    pub native_event_buffer: Vec<TerminalInputEvent>,
     #[cfg(feature = "utf8")]
     pub decoder: Utf8Decoder,
     pub paddr: usize,
@@ -29,23 +31,20 @@ pub struct VirtualTerminal {
 }
 
 impl VirtualTerminal {
-    const TERMIOS_LFLAG_OFFSET: usize = 12;
-    const TERMIOS_ECHO: u32 = 0x0000_0008;
-
     pub fn new(id: usize, name: &str) -> Self {
         let cols = 80;
         let rows = 25;
         Self {
             id,
             name: String::from(name),
+            session_mode: TerminalSessionMode::ByteStream,
             mode: TerminalDisplayMode::Text,
             winsize: WindowSize { rows, cols, xpixel: 800, ypixel: 600 },
             cursor: (0, 0),
             grid: vec![b' ' as u32; (cols * rows) as usize],
             seat_ids: Vec::new(),
             input_buffer: Vec::new(),
-            termios: [0; 44],
-            pgrp: 0,
+            native_event_buffer: Vec::new(),
             #[cfg(feature = "utf8")]
             decoder: Utf8Decoder::new(),
             paddr: 0,
@@ -59,64 +58,20 @@ impl VirtualTerminal {
     }
 
     pub fn process_input_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let mut echo_buf = Vec::new();
-        let do_echo = self.local_echo_enabled();
         for &b in bytes {
-            if b == 0x7f || b == 0x08 {
-                if !self.input_buffer.is_empty() {
-                    self.input_buffer.pop();
-                    if do_echo {
-                        self.write_str("\x08 \x08");
-                        echo_buf.extend_from_slice(b"\x08 \x08");
-                    }
-                }
-            } else if b == 0x1b {
-                // Escape character (ESC)
-                self.input_buffer.push(b);
-                // self.write_str("^["); // Visual echo for ESC
-                // echo_buf.extend_from_slice(b"^[");
-            } else if b == b'\r' {
-                self.input_buffer.push(b'\n');
-                if do_echo {
-                    self.write_str("\n");
-                    echo_buf.extend_from_slice(b"\r\n");
-                }
-            } else {
-                #[cfg(feature = "utf8")]
-                {
-                    let decoded = self.decoder.process_byte(b);
-                    if !decoded.is_empty() {
-                        for &ub in decoded.as_bytes() {
-                            self.input_buffer.push(ub);
-                        }
-                        if do_echo {
-                            self.write_str(&decoded);
-                            echo_buf.extend_from_slice(decoded.as_bytes());
-                        }
-                    }
-                }
-                #[cfg(not(feature = "utf8"))]
-                {
-                    self.input_buffer.push(b);
-                    if do_echo && b >= 32 && b < 127 {
-                        self.write_str(core::str::from_utf8(&[b]).unwrap());
-                        echo_buf.push(b);
-                    }
+            #[cfg(feature = "utf8")]
+            {
+                let decoded = self.decoder.process_byte(b);
+                if !decoded.is_empty() {
+                    self.input_buffer.extend_from_slice(decoded.as_bytes());
                 }
             }
+            #[cfg(not(feature = "utf8"))]
+            {
+                self.input_buffer.push(b);
+            }
         }
-        echo_buf
-    }
-
-    fn local_echo_enabled(&self) -> bool {
-        let off = Self::TERMIOS_LFLAG_OFFSET;
-        if self.termios.len() < off + 4 {
-            return true;
-        }
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&self.termios[off..off + 4]);
-        let lflag = u32::from_ne_bytes(raw);
-        (lflag & Self::TERMIOS_ECHO) != 0
+        Vec::new()
     }
 
     pub fn write_str(&mut self, s: &str) {
@@ -163,6 +118,18 @@ impl VirtualTerminal {
 
     pub fn read_char(&mut self) -> Option<u8> {
         if !self.input_buffer.is_empty() { Some(self.input_buffer.remove(0)) } else { None }
+    }
+
+    pub fn push_native_event(&mut self, event: TerminalInputEvent) {
+        self.native_event_buffer.push(event);
+    }
+
+    pub fn read_native_event(&mut self) -> Option<TerminalInputEvent> {
+        if self.native_event_buffer.is_empty() {
+            None
+        } else {
+            Some(self.native_event_buffer.remove(0))
+        }
     }
 
     pub fn set_mode(&mut self, mode: TerminalDisplayMode) {

@@ -1,8 +1,7 @@
 use crate::prism::PrismServer;
-use core::cmp::min;
 use glenda::error::Error;
 use glenda::ipc::{Badge, UTCB};
-use glenda::protocol::terminal::{TerminalDisplayMode, WindowSize};
+use glenda::protocol::terminal::{TerminalDisplayMode, TerminalSessionMode, WindowSize};
 
 impl PrismServer<'_> {
     fn active_vt_for_badge(&self, badge: Badge) -> Result<usize, Error> {
@@ -51,6 +50,57 @@ impl PrismServer<'_> {
             .map(|v| !v.input_buffer.is_empty())
             .ok_or(Error::NotFound)?;
         Ok(usize::from(has_input))
+    }
+
+    pub fn handle_terminal_set_session_mode(
+        &mut self,
+        badge: Badge,
+        mode: TerminalSessionMode,
+    ) -> Result<(), Error> {
+        let vt_id = self.active_vt_for_badge(badge)?;
+        if let Some(vt) = self.muxer.vts.iter_mut().find(|v| v.id == vt_id) {
+            vt.session_mode = mode;
+            return Ok(());
+        }
+        Err(Error::NotFound)
+    }
+
+    pub fn handle_native_put_text(&mut self, utcb: &mut UTCB) -> Result<usize, Error> {
+        self.handle_console_put_str(utcb)
+    }
+
+    pub fn handle_native_poll_event(&mut self, _badge: Badge) -> Result<usize, Error> {
+        let vt_id = self.active_vt_for_badge(_badge)?;
+        if let Err(e) = self.poll_input_rings() {
+            warn!("poll_input_rings during TERM_NATIVE_POLL_EVENT failed: {:?}", e);
+        }
+        let has_event = self
+            .muxer
+            .vts
+            .iter()
+            .find(|v| v.id == vt_id)
+            .map(|v| !v.native_event_buffer.is_empty())
+            .ok_or(Error::NotFound)?;
+        Ok(usize::from(has_event))
+    }
+
+    pub fn handle_native_get_event(&mut self, badge: Badge, utcb: &mut UTCB) -> Result<usize, Error> {
+        let vt_id = self.active_vt_for_badge(badge)?;
+
+        loop {
+            let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
+            if let Some(event) = vt.read_native_event() {
+                unsafe {
+                    utcb.write_postcard(&event)?;
+                }
+                return Ok(1);
+            }
+
+            if let Err(e) = self.poll_input_rings() {
+                warn!("poll_input_rings during TERM_NATIVE_GET_EVENT failed: {:?}", e);
+            }
+            core::hint::spin_loop();
+        }
     }
 
     pub fn handle_console_get_str(
@@ -138,48 +188,33 @@ impl PrismServer<'_> {
         Err(Error::NotFound)
     }
 
-    pub fn handle_terminal_get_termios(
+    pub fn handle_legacy_get_termios(
         &mut self,
-        badge: Badge,
-        utcb: &mut UTCB,
+        _badge: Badge,
+        _utcb: &mut UTCB,
     ) -> Result<usize, Error> {
-        let vt_id = self.active_vt_for_badge(badge)?;
-        let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
-        log!("Get termios req for VT {} (requested by {:?})", vt_id, badge);
-        let n = min(utcb.buffer_mut().len(), vt.termios.len());
-        utcb.buffer_mut()[..n].copy_from_slice(&vt.termios[..n]);
-        utcb.set_size(n);
-        Ok(n)
+        // Deprecated: termios policy moved to APE tty compatibility layer.
+        Err(Error::NotSupported)
     }
 
-    pub fn handle_terminal_set_termios(
+    pub fn handle_legacy_set_termios(
         &mut self,
-        badge: Badge,
-        req_len: usize,
-        utcb: &mut UTCB,
+        _badge: Badge,
+        _req_len: usize,
+        _utcb: &mut UTCB,
     ) -> Result<(), Error> {
-        let vt_id = self.active_vt_for_badge(badge)?;
-        let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
-        log!("Set termios req for VT {} (requested by {:?}), len={}", vt_id, badge, req_len);
-        let req_len = min(req_len, utcb.buffer().len());
-        let n = min(req_len, vt.termios.len());
-        vt.termios[..n].copy_from_slice(&utcb.buffer()[..n]);
-        Ok(())
+        // Deprecated: termios policy moved to APE tty compatibility layer.
+        Err(Error::NotSupported)
     }
 
-    pub fn handle_terminal_get_pgrp(&mut self, badge: Badge) -> Result<usize, Error> {
-        let vt_id = self.active_vt_for_badge(badge)?;
-        let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
-        log!("Get pgrp req for VT {} (requested by {:?})", vt_id, badge);
-        Ok(vt.pgrp as usize)
+    pub fn handle_legacy_get_pgrp(&mut self, _badge: Badge) -> Result<usize, Error> {
+        // Deprecated: foreground pgrp policy moved to APE tty compatibility layer.
+        Err(Error::NotSupported)
     }
 
-    pub fn handle_terminal_set_pgrp(&mut self, badge: Badge, pgrp: i32) -> Result<(), Error> {
-        let vt_id = self.active_vt_for_badge(badge)?;
-        let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
-        log!("Set pgrp req for VT {} (requested by {:?})", vt_id, badge);
-        vt.pgrp = pgrp;
-        Ok(())
+    pub fn handle_legacy_set_pgrp(&mut self, _badge: Badge, _pgrp: i32) -> Result<(), Error> {
+        // Deprecated: foreground pgrp policy moved to APE tty compatibility layer.
+        Err(Error::NotSupported)
     }
 
     pub fn switch_vt(&mut self, badge: Badge, seat_id: usize, vt_id: usize) -> Result<(), Error> {

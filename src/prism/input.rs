@@ -5,12 +5,22 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use glenda::drivers::interface::InputDriver;
 use glenda::drivers::protocol::input::{
-    EV_KEY, InputEvent as DriverInputEvent, KEY_ENTER, KEY_ESC, KEY_SPACE,
+    EV_KEY, EV_REL, InputEvent as DriverInputEvent, KEY_ENTER, KEY_ESC, KEY_SPACE, REL_WHEEL,
+    REL_X, REL_Y,
 };
 use glenda::error::Error;
 use glenda::ipc::Badge;
+use glenda::protocol::terminal::{TerminalInputEvent, TerminalSessionMode};
 
 const KEY_BACKSPACE: u16 = 14;
+const KEY_TAB: u16 = 15;
+const KEY_UP: u16 = 103;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_DOWN: u16 = 108;
+const KEY_HOME: u16 = 102;
+const KEY_END: u16 = 107;
+const KEY_DELETE: u16 = 111;
 const KEY_1: u16 = 2;
 const KEY_0: u16 = 11;
 const KEY_Q: u16 = 16;
@@ -44,17 +54,50 @@ impl PrismServer<'_> {
         Some(active_vt_id)
     }
 
-    fn map_input_event_to_byte(event: &DriverInputEvent) -> Option<u8> {
+    fn append_input_event_bytes(event: &DriverInputEvent, out: &mut Vec<u8>) {
         if event.type_ != EV_KEY || event.value != 1 {
-            return None;
+            return;
         }
 
         match event.code {
-            KEY_ENTER => Some(b'\r'),
-            KEY_SPACE => Some(b' '),
-            KEY_ESC => Some(0x1b),
-            KEY_BACKSPACE => Some(0x08),
-            code => Self::keycode_to_ascii(code),
+            KEY_ENTER => out.push(b'\r'),
+            KEY_SPACE => out.push(b' '),
+            KEY_ESC => out.push(0x1b),
+            KEY_BACKSPACE => out.push(0x7f),
+            KEY_TAB => out.push(b'\t'),
+            KEY_UP => out.extend_from_slice(b"\x1b[A"),
+            KEY_DOWN => out.extend_from_slice(b"\x1b[B"),
+            KEY_RIGHT => out.extend_from_slice(b"\x1b[C"),
+            KEY_LEFT => out.extend_from_slice(b"\x1b[D"),
+            KEY_HOME => out.extend_from_slice(b"\x1b[H"),
+            KEY_END => out.extend_from_slice(b"\x1b[F"),
+            KEY_DELETE => out.extend_from_slice(b"\x1b[3~"),
+            code => {
+                if let Some(b) = Self::keycode_to_ascii(code) {
+                    out.push(b);
+                }
+            }
+        }
+    }
+
+    fn map_input_event_to_native(event: &DriverInputEvent) -> Option<TerminalInputEvent> {
+        match event.type_ {
+            EV_KEY => {
+                if event.value == 1 {
+                    Some(TerminalInputEvent::KeyDown { keycode: event.code as u32 })
+                } else if event.value == 0 {
+                    Some(TerminalInputEvent::KeyUp { keycode: event.code as u32 })
+                } else {
+                    None
+                }
+            }
+            EV_REL => match event.code {
+                REL_X => Some(TerminalInputEvent::MouseMove { x: event.value, y: 0 }),
+                REL_Y => Some(TerminalInputEvent::MouseMove { x: 0, y: event.value }),
+                REL_WHEEL => Some(TerminalInputEvent::Scroll { dx: 0, dy: event.value }),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -220,18 +263,47 @@ impl PrismServer<'_> {
             return Ok(None);
         };
 
-        let mut inputs = Vec::new();
+        let mut raw_events = Vec::new();
         if let Some(device) = self.input_devices.get_mut(name)
             && let DeviceClientKind::Input(client) = &mut device.kind
         {
             while let Some(event) = client.poll_event() {
-                if let Some(b) = Self::map_input_event_to_byte(&event) {
-                    inputs.push(b);
-                }
+                raw_events.push(event);
             }
         }
 
-        Ok(self.apply_input_to_vt(vt_id, &inputs))
+        if raw_events.is_empty() {
+            return Ok(None);
+        }
+
+        let session_mode = self
+            .muxer
+            .vts
+            .iter()
+            .find(|v| v.id == vt_id)
+            .map(|v| v.session_mode)
+            .ok_or(Error::NotFound)?;
+
+        match session_mode {
+            TerminalSessionMode::ByteStream => {
+                let mut inputs = Vec::new();
+                for event in &raw_events {
+                    Self::append_input_event_bytes(event, &mut inputs);
+                }
+                Ok(self.apply_input_to_vt(vt_id, &inputs))
+            }
+            TerminalSessionMode::Native => {
+                let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
+                let mut pushed = 0usize;
+                for event in &raw_events {
+                    if let Some(native) = Self::map_input_event_to_native(event) {
+                        vt.push_native_event(native);
+                        pushed += 1;
+                    }
+                }
+                if pushed > 0 { Ok(Some(vt_id)) } else { Ok(None) }
+            }
+        }
     }
 
     fn process_ring(&mut self, _badge: Badge) -> Result<(), Error> {
