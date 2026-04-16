@@ -4,7 +4,7 @@ use crate::renderer::fb::FramebufferRenderer;
 use alloc::boxed::Box;
 use alloc::string::String;
 use glenda::arch::mem::PGSIZE;
-use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Frame};
+use glenda::cap::{CSPACE_CAP, CapPtr, Endpoint, Page};
 use glenda::drivers::client::fb::FbClient;
 use glenda::drivers::client::input::InputClient;
 use glenda::drivers::client::uart::UartClient;
@@ -129,10 +129,10 @@ impl PrismServer<'_> {
         let resources = DeviceResource {
             name: String::from(name),
             kind: DeviceClientKind::Fb(client),
-            ring_frame: Frame::from(CapPtr::null()),
+            ring_frame: Page::from(CapPtr::null()),
             ring_vaddr: 0,
             ring_pages: 0,
-            data_frame: Frame::from(CapPtr::null()),
+            data_frame: Page::from(CapPtr::null()),
             data_vaddr: 0,
             data_pages: 0,
             endpoint: ep,
@@ -178,7 +178,7 @@ impl PrismServer<'_> {
         let resources = DeviceResource {
             name: String::from(name),
             kind: DeviceClientKind::Input(client),
-            ring_frame: Frame::from(ring_recv_slot),
+            ring_frame: Page::from(ring_recv_slot),
             ring_vaddr: ring_params.vaddr,
             ring_pages: ring_params.size.div_ceil(PGSIZE),
             data_frame: data_shm.frame().clone(),
@@ -364,7 +364,7 @@ impl PrismServer<'_> {
         let resource = DeviceResource {
             name: String::from(name),
             kind: DeviceClientKind::Uart(client),
-            ring_frame: Frame::from(ring_recv_slot),
+            ring_frame: Page::from(ring_recv_slot),
             ring_vaddr: ring_params.vaddr,
             ring_pages: ring_params.size.div_ceil(PGSIZE),
             data_frame: data_shm.frame().clone(),

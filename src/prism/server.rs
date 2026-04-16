@@ -152,10 +152,10 @@ impl SystemService for PrismServer<'_> {
             },
             (protocol::TERMINAL_PROTO, protocol::terminal::TERM_GET_URING) => |s: &mut Self, u: &mut UTCB| {
                 let frame_slot = s.cspace.alloc(s.res_client)?;
-                s.res_client.alloc(Badge::null(), glenda::cap::CapType::Frame, 1, frame_slot)?;
-                let frame = glenda::cap::Frame::from(frame_slot);
+                s.res_client.alloc(Badge::null(), glenda::cap::CapType::Page, 1, frame_slot)?;
+                let frame = glenda::cap::Page::from(frame_slot);
                 let ring_vaddr = s.mem_pool.reserve_vaddr_dma(4096);
-                s.vspace.map_frame(
+                s.vspace.map_page(
                     frame,
                     ring_vaddr,
                     glenda::mem::Perms::READ | glenda::mem::Perms::WRITE,

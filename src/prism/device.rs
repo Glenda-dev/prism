@@ -1,5 +1,5 @@
 use alloc::string::String;
-use glenda::cap::{Endpoint, Frame};
+use glenda::cap::{Endpoint, Page};
 use glenda::drivers::client::fb::FbClient;
 use glenda::drivers::client::input::InputClient;
 use glenda::drivers::client::uart::UartClient;
@@ -20,10 +20,10 @@ pub enum DeviceClientKind {
 pub struct DeviceResource {
     pub name: String,
     pub kind: DeviceClientKind,
-    pub ring_frame: Frame,
+    pub ring_frame: Page,
     pub ring_vaddr: usize,
     pub ring_pages: usize,
-    pub data_frame: Frame,
+    pub data_frame: Page,
     pub data_vaddr: usize,
     pub data_pages: usize,
     pub endpoint: Endpoint,

@@ -34,7 +34,7 @@ impl<'a> ConfigLoader<'a> {
             self.res_client.get_config(Badge::null(), TTY_CONFIG_PATH, TTY_CONFIG_BUF_SLOT)?;
         let config_vaddr = TTY_CONFIG_VA;
         {
-            self.vspace.map_frame(
+            self.vspace.map_page(
                 frame,
                 config_vaddr,
                 glenda::mem::Perms::READ | glenda::mem::Perms::WRITE,
@@ -60,7 +60,7 @@ impl<'a> ConfigLoader<'a> {
         match self.res_client.get_config(Badge::null(), font_path, TTY_FONT_BUF_SLOT) {
             Ok((font_frame, font_size)) => {
                 let font_vaddr = TTY_FONT_VA;
-                match self.vspace.map_frame(
+                match self.vspace.map_page(
                     font_frame,
                     font_vaddr,
                     glenda::mem::Perms::READ,
