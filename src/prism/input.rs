@@ -293,7 +293,8 @@ impl PrismServer<'_> {
                 Ok(self.apply_input_to_vt(vt_id, &inputs))
             }
             TerminalSessionMode::Native => {
-                let vt = self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
+                let vt =
+                    self.muxer.vts.iter_mut().find(|v| v.id == vt_id).ok_or(Error::NotFound)?;
                 let mut pushed = 0usize;
                 for event in &raw_events {
                     if let Some(native) = Self::map_input_event_to_native(event) {
