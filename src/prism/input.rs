@@ -228,10 +228,19 @@ impl PrismServer<'_> {
             if let DeviceClientKind::Uart(client) = &mut device.kind {
                 while let Some(cqe) = client.pop_cqe() {
                     if cqe.user_data == 2 {
-                        let mut buf = [0u8; 1024];
-                        let read = client.pop_shm_ring(&mut buf);
-                        if read > 0 {
+                        loop {
+                            let mut buf = [0u8; 1024];
+                            let read = client.pop_shm_ring(&mut buf);
+                            if read == 0 {
+                                break;
+                            }
+
                             inputs.extend_from_slice(&buf[..read]);
+
+                            // Drain until empty (or short read) to avoid leaving bytes in shared ring.
+                            if read < buf.len() {
+                                break;
+                            }
                         }
                     }
                 }
