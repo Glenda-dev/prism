@@ -84,7 +84,11 @@ impl PrismServer<'_> {
         Ok(usize::from(has_event))
     }
 
-    pub fn handle_native_get_event(&mut self, badge: Badge, utcb: &mut UTCB) -> Result<usize, Error> {
+    pub fn handle_native_get_event(
+        &mut self,
+        badge: Badge,
+        utcb: &mut UTCB,
+    ) -> Result<usize, Error> {
         let vt_id = self.active_vt_for_badge(badge)?;
 
         loop {
