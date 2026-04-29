@@ -29,7 +29,7 @@ fn main() -> usize {
 
     // 1. Setup CSpace
     let mut cspace_mgr = CSpaceManager::new(CSPACE_CAP, 16);
-    let mut vspace_mgr = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x8000_0000);
+    let mut vspace_mgr = VSpaceManager::new(glenda::cap::VSPACE_CAP, 0x7000_0000, 0x1000_0000);
     let mut res_client = ResourceClient::new(MONITOR_CAP);
 
     // 2. Obtain Unicorn (Device Manager) Endpoint
